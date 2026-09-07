@@ -1,0 +1,21 @@
+[package]
+name = "vioraharness-tui"
+version = "0.1.0"
+edition = "2021"
+description = "VioraHarness Ratatui TUI — chat, permissions, sessions, diff"
+license = "Apache-2.0"
+
+[dependencies]
+vioraharness-core = { path = "../core" }
+tokio = { version = "1", features = ["full"] }
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+tracing = "0.1"
+reqwest = { version = "0.12", features = ["json","rustls-tls-manual-roots"] }
+arboard = { version = "3", features = ["wayland-data-control"] }
+base64 = "0.22"
+png = "0.17"
+unicode-width = "0.2"

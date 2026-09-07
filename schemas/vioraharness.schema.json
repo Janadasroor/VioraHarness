@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Janadasroor/VioraEDA/schemas/vioraharness.schema.json",
+  "title": "VioraHarness config",
+  "type": "object",
+  "properties": {
+    "compaction": {
+      "type": "object",
+      "properties": {
+        "keepTail": { "type": "integer", "minimum": 1 },
+        "threshold": { "type": "number", "minimum": 0.0, "maximum": 1.0 }
+      },
+      "additionalProperties": false
+    },
+    "permissions": {
+      "type": "object",
+      "patternProperties": {
+        "^.*$": { "type": "string", "enum": ["allow", "ask", "deny"] }
+      }
+    },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "openrouter": { "$ref": "#/definitions/providerEntry" },
+        "gemini": { "$ref": "#/definitions/providerEntry" },
+        "opencode": { "$ref": "#/definitions/providerEntry" },
+        "opencode-go": { "$ref": "#/definitions/providerEntry" }
+      },
+      "additionalProperties": { "$ref": "#/definitions/providerEntry" }
+    },
+    "sandbox": { "type": "string", "enum": ["strict", "relaxed", "off"] },
+    "session": {
+      "type": "object",
+      "properties": {
+        "dbPath": { "type": "string" },
+        "tracesDir": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "theme": {
+      "type": "object",
+      "properties": {
+        "accent": { "type": "string" },
+        "background": { "type": "string" },
+        "backgroundElement": { "type": "string" },
+        "backgroundPanel": { "type": "string" },
+        "border": { "type": "string" },
+        "borderActive": { "type": "string" },
+        "borderSubtle": { "type": "string" },
+        "error": { "type": "string" },
+        "info": { "type": "string" },
+        "primary": { "type": "string" },
+        "secondary": { "type": "string" },
+        "success": { "type": "string" },
+        "text": { "type": "string" },
+        "textMuted": { "type": "string" },
+        "warning": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "tui": {
+      "type": "object",
+      "properties": {
+        "show_thinking": { "type": "boolean" },
+        "theme": { "type": "string" },
+        "thinkingOpacity": { "type": "number" },
+        "thinking_label": { "type": "string" },
+        "thinking_title": { "type": "string" },
+        "tool_display": {
+          "type": "object",
+          "description": "Per-tool chat-card verbosity: default + per-tool hidden|quiet|compact|full",
+          "properties": {
+            "default": {
+              "type": "string",
+              "enum": ["hidden", "quiet", "compact", "full"]
+            }
+          },
+          "additionalProperties": { "type": "string" }
+        },
+        "wake_on_task_done": {
+          "type": "boolean",
+          "description": "Auto-submit a follow-up turn when a background task finishes while idle (default true)"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "definitions": {
+    "providerEntry": {
+      "type": "object",
+      "properties": {
+        "apiKeyEnv": { "type": "string" },
+        "baseURL": { "type": "string" },
+        "defaultModel": { "type": "string" },
+        "exploreModel": { "type": "string" },
+        "models": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["models"],
+      "additionalProperties": true
+    }
+  }
+}

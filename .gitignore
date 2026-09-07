@@ -1,0 +1,12 @@
+/target/
+Cargo.lock
+.env
+*.db
+*.log
+.vioraharness/
+snapshots/
+
+# Internal-only: agent working memory + roadmaps/plans, never pushed.
+AGENTS.md
+roadmap.md
+RESEARCH.md
