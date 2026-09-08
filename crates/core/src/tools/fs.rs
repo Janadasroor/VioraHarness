@@ -518,10 +518,6 @@ fn glob_match_path(rel: &str, pattern: &str) -> bool {
     match_segments(&rsegs, &psegs)
 }
 
-fn glob_match(name: &str, pattern: &str) -> bool {
-    glob_match_path(name, pattern)
-}
-
 pub async fn grep(args: Value) -> Value {
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -533,7 +529,7 @@ pub async fn grep(args: Value) -> Value {
     if !super::viora::approved_call() && !is_within_root(&base) {
         return json!({"ok": false, "error": format!("access denied: {} outside project root (approve in the Ask dialog or run with -y to allow external access)", base.display())});
     }
-    match tokio::process::Command::new("rg")
+    if let Ok(out) = tokio::process::Command::new("rg")
         .args([
             "--json",
             "--no-heading",
@@ -544,92 +540,86 @@ pub async fn grep(args: Value) -> Value {
         .output()
         .await
     {
-        Ok(out) => {
-            // rg exit 0 = matches, 1 = no matches; other codes = real error.
-            if !out.status.success() && out.status.code() != Some(1) {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let msg = err
-                    .lines()
-                    .next()
-                    .unwrap_or("search failed")
-                    .trim()
-                    .to_string();
-                return json!({"ok": false, "error": format!("rg search failed: {msg}"), "pattern": pattern, "hits": []});
-            }
-            // rg answered (matches or clean no-match).
-            let text = String::from_utf8_lossy(&out.stdout);
-            let mut hits = Vec::new();
-            for line in text.lines() {
-                let v: Value = match serde_json::from_str(line) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                if v.get("type").and_then(|t| t.as_str()) == Some("match") {
-                    let data = v.get("data").cloned().unwrap_or(json!({}));
-                    let path = data
-                        .get("path")
-                        .and_then(|p| p.get("text"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    let lines = data
-                        .get("lines")
-                        .and_then(|l| l.get("text"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
-                    let line_no = data
-                        .get("line_number")
-                        .and_then(|n| n.as_u64())
-                        .unwrap_or(0);
-                    hits.push(json!({"path": path, "line": line_no, "text": lines.trim_end()}));
-                    if hits.len() >= 100 {
-                        break;
-                    }
-                }
-            }
-            return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100, "backend": "rg"});
+        // rg exit 0 = matches, 1 = no matches; other codes = real error.
+        if !out.status.success() && out.status.code() != Some(1) {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let msg = err
+                .lines()
+                .next()
+                .unwrap_or("search failed")
+                .trim()
+                .to_string();
+            return json!({"ok": false, "error": format!("rg search failed: {msg}"), "pattern": pattern, "hits": []});
         }
-        Err(_) => {}
-    }
-
-    // Fallback when rg is not installed: system grep -R. Same shape.
-    // grep exit 0 = matches, 1 = no matches; spawn error = no grep either.
-    match tokio::process::Command::new("grep")
-        .args(["-RnI", "--", pattern, base.to_string_lossy().as_ref()])
-        .output()
-        .await
-    {
-        Ok(out) => {
-            // grep exit 0 = matches, 1 = no matches; other codes = real error.
-            if !out.status.success() && out.status.code() != Some(1) {
-                let err = String::from_utf8_lossy(&out.stderr);
-                let msg = err
-                    .lines()
-                    .next()
-                    .unwrap_or("search failed")
-                    .trim()
-                    .to_string();
-                return json!({"ok": false, "error": format!("grep search failed: {msg}"), "pattern": pattern, "hits": []});
-            }
-            let text = String::from_utf8_lossy(&out.stdout);
-            let mut hits = Vec::new();
-            for line in text.lines() {
-                let mut parts = line.splitn(3, ':');
-                let (Some(path), Some(no), Some(text)) = (parts.next(), parts.next(), parts.next())
-                else {
-                    continue;
-                };
-                let line_no = no.parse::<u64>().unwrap_or(0);
-                if line_no == 0 {
-                    continue;
-                }
-                hits.push(json!({"path": path, "line": line_no, "text": text.trim_end()}));
+        // rg answered (matches or clean no-match).
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut hits = Vec::new();
+        for line in text.lines() {
+            let v: Value = match serde_json::from_str(line) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+            if v.get("type").and_then(|t| t.as_str()) == Some("match") {
+                let data = v.get("data").cloned().unwrap_or(json!({}));
+                let path = data
+                    .get("path")
+                    .and_then(|p| p.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let lines = data
+                    .get("lines")
+                    .and_then(|l| l.get("text"))
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("");
+                let line_no = data
+                    .get("line_number")
+                    .and_then(|n| n.as_u64())
+                    .unwrap_or(0);
+                hits.push(json!({"path": path, "line": line_no, "text": lines.trim_end()}));
                 if hits.len() >= 100 {
                     break;
                 }
             }
-            return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100, "backend": "grep"});
         }
-        Err(_) => {}
+        return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100, "backend": "rg"});
+    }
+
+    // Fallback when rg is not installed: system grep -R. Same shape.
+    // grep exit 0 = matches, 1 = no matches; spawn error = no grep either.
+    if let Ok(out) = tokio::process::Command::new("grep")
+        .args(["-RnI", "--", pattern, base.to_string_lossy().as_ref()])
+        .output()
+        .await
+    {
+        // grep exit 0 = matches, 1 = no matches; other codes = real error.
+        if !out.status.success() && out.status.code() != Some(1) {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let msg = err
+                .lines()
+                .next()
+                .unwrap_or("search failed")
+                .trim()
+                .to_string();
+            return json!({"ok": false, "error": format!("grep search failed: {msg}"), "pattern": pattern, "hits": []});
+        }
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut hits = Vec::new();
+        for line in text.lines() {
+            let mut parts = line.splitn(3, ':');
+            let (Some(path), Some(no), Some(text)) = (parts.next(), parts.next(), parts.next())
+            else {
+                continue;
+            };
+            let line_no = no.parse::<u64>().unwrap_or(0);
+            if line_no == 0 {
+                continue;
+            }
+            hits.push(json!({"path": path, "line": line_no, "text": text.trim_end()}));
+            if hits.len() >= 100 {
+                break;
+            }
+        }
+        return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100, "backend": "grep"});
     }
 
     json!({"ok": false, "error": "no search backend available (tried `rg` and `grep -R`; install ripgrep for best results)", "pattern": pattern, "hits": []})

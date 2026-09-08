@@ -161,7 +161,7 @@ pub fn rewind_to_seq(
     paths.sort();
     for path in paths {
         let versions = &by_path[path];
-        let at_or_before = versions.iter().filter(|(s, _)| *s <= target_seq).last();
+        let at_or_before = versions.iter().rfind(|(s, _)| *s <= target_seq);
         let (content, earliest) = match at_or_before {
             Some((_, c)) => (c, false),
             None => (&versions[0].1, true),

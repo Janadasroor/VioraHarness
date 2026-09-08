@@ -1411,7 +1411,7 @@ mod tests {
         rotate_log_if_big(&log_s, 100);
         assert!(!log.exists(), "big log moved away");
         assert_eq!(std::fs::read(dir.join("tui.log.1")).unwrap().len(), 200);
-        rotate_log_if_big(&dir.join("missing.log").to_string_lossy().to_string(), 10);
+        rotate_log_if_big(&dir.join("missing.log").to_string_lossy(), 10);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use std::collections::HashSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::{Duration, SystemTime};
 
 use super::store::SessionStore;
@@ -17,13 +17,12 @@ pub struct GcReport {
 
 /// Garbage-collect snapshot state for sessions idle longer than `max_idle`.
 ///
-/// Two sides, kept consistent:
-/// - DB: snapshot rows of sessions whose `updated_at` is older than the
-///   cutoff, plus rows of sessions missing from the DB entirely (orphans).
-///   Conversation messages are never touched — only undo/rewind fuel.
-/// - Disk: `<snapshots_root>/<session>/<seq>/` dirs belonging to pruned
-///   sessions, or older than the cutoff themselves (covers DB-less runs).
-/// Empty session dirs are removed afterwards. Nothing else is deleted.
+/// Two sides, kept consistent. DB side: snapshot rows of sessions whose
+/// `updated_at` is older than the cutoff, plus rows of sessions missing
+/// from the DB entirely (orphans). Conversation messages are never touched,
+/// only undo/rewind fuel. Disk side: `<snapshots_root>/<session>/<seq>/`
+/// dirs belonging to pruned sessions, or older than the cutoff themselves
+/// (covers DB-less runs). Empty session dirs are removed afterwards.
 pub fn gc_snapshots(
     store: &SessionStore,
     snapshots_root: &Path,
@@ -158,7 +157,13 @@ mod tests {
             .output();
     }
 
-    fn file_store(tag: &str) -> (SessionStore, PathBuf, std::sync::MutexGuard<'static, ()>) {
+    fn file_store(
+        tag: &str,
+    ) -> (
+        SessionStore,
+        std::path::PathBuf,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
         let guard = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("vh_gc_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

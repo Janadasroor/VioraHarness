@@ -1065,11 +1065,10 @@ mod tests {
         app.reload_display_from_store(&store, "sess-rewind")
             .unwrap_or(0);
         assert!(
-            store
+            !store
                 .get_tool_calls_grouped_simple("sess-rewind")
                 .unwrap()
-                .get(&3)
-                .is_none(),
+                .contains_key(&3),
             "dropped tool call purged"
         );
         assert!(

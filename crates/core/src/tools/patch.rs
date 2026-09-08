@@ -296,9 +296,7 @@ pub fn apply_hunks(old: &[String], hunks: &[Hunk]) -> Result<Vec<String>, String
                     .take(4)
                     .collect();
                 if at.is_empty() {
-                    format!(
-                        " (first expected line occurs nowhere in the file — it may differ by whitespace/encoding; `read` the exact lines)"
-                    )
+                    " (first expected line occurs nowhere in the file — it may differ by whitespace/encoding; `read` the exact lines)".to_string()
                 } else {
                     format!(" (first expected line occurs at file line(s) {})", at.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))
                 }
