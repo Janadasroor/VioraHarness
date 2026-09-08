@@ -828,7 +828,7 @@ impl AgentLoop {
                 if let Some(ref s) = store {
                     let v: Value =
                         serde_json::from_str(&result_str).unwrap_or(json!({"raw": result_str}));
-                    let _ = s.settle_tool_call(&id, &v);
+                    let _ = s.settle_tool_call(&session_id, &id, &v);
 
                     let _ = s.append_message_full(
                         &session_id,

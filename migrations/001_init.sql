@@ -16,13 +16,14 @@ CREATE TABLE IF NOT EXISTS messages (
     UNIQUE(session_id, seq)
 );
 CREATE TABLE IF NOT EXISTS tool_calls (
-    id TEXT PRIMARY KEY,
+    id TEXT NOT NULL,
     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     message_seq INTEGER NOT NULL,
     name TEXT NOT NULL,
     args TEXT NOT NULL, -- JSON
     result TEXT,        -- JSON nullable until settled
-    status TEXT NOT NULL DEFAULT 'pending' -- pending|settled|error
+    status TEXT NOT NULL DEFAULT 'pending', -- pending|settled|error
+    PRIMARY KEY (session_id, id)
 );
 CREATE TABLE IF NOT EXISTS events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

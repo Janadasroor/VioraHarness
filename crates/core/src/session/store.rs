@@ -138,6 +138,53 @@ impl SessionStore {
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN theme TEXT", []);
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN timestamp TEXT", []);
 
+        // 003: tool_calls PK (session_id, id) so forks keep tool history.
+        // Legacy DBs have id-only PK and silently drop forked tool calls.
+        // Guarded: runs once, only when the old schema is detected.
+        let tc_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'tool_calls'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or_default();
+        if !tc_sql.is_empty() && !tc_sql.contains("PRIMARY KEY (session_id, id)") {
+            let _ = conn.execute_batch(
+                "CREATE TABLE tool_calls_new (
+                    id TEXT NOT NULL,
+                    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+                    message_seq INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    args TEXT NOT NULL,
+                    result TEXT,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    created_at INTEGER,
+                    settled_at INTEGER,
+                    PRIMARY KEY (session_id, id)
+                );",
+            );
+            let old_rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM tool_calls", [], |r| r.get(0))
+                .unwrap_or(-1);
+            let copied = conn
+                .execute(
+                    "INSERT OR IGNORE INTO tool_calls_new (id, session_id, message_seq, name, args, result, status, created_at, settled_at) SELECT id, session_id, message_seq, name, args, result, status, created_at, settled_at FROM tool_calls",
+                    [],
+                )
+                .unwrap_or(0) as i64;
+            // Only swap when every row survived (legacy ids are globally
+            // unique, so OR IGNORE cannot drop rows here).
+            if old_rows >= 0 && copied == old_rows {
+                let _ = conn.execute_batch(
+                    "DROP TABLE tool_calls;
+                     ALTER TABLE tool_calls_new RENAME TO tool_calls;",
+                );
+            } else {
+                let _ = conn.execute_batch("DROP TABLE IF EXISTS tool_calls_new;");
+                eprintln!("migrate 003 skipped: copy mismatch ({copied}/{old_rows}), keeping legacy tool_calls");
+            }
+        }
+
         let _ = conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS todos (
                 session_id TEXT NOT NULL,
@@ -592,22 +639,24 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn settle_tool_call(&self, id: &str, result: &Value) -> Result<()> {
+    pub fn settle_tool_call(&self, session_id: &str, id: &str, result: &Value) -> Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
         let now = Self::now();
-        let session_id: Option<String> = tx
-            .query_row(
-                "SELECT session_id FROM tool_calls WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?;
         tx.execute(
-            "UPDATE tool_calls SET result = ?1, status = 'settled', settled_at = ?3 WHERE id = ?2",
-            params![result.to_string(), id, now],
+            "UPDATE tool_calls SET result = ?1, status = 'settled', settled_at = ?3 WHERE session_id = ?4 AND id = ?2",
+            params![result.to_string(), id, now, session_id],
         )?;
-        if let Some(sid) = session_id {
+        let session_known: bool = tx
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if session_known {
+            let sid = session_id;
             let ev_seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = ?1",
                 params![sid],
@@ -626,22 +675,24 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn fail_tool_call(&self, id: &str, error: &str) -> Result<()> {
+    pub fn fail_tool_call(&self, session_id: &str, id: &str, error: &str) -> Result<()> {
         let mut conn = self.pool.get()?;
         let tx = conn.transaction()?;
         let now = Self::now();
-        let session_id: Option<String> = tx
-            .query_row(
-                "SELECT session_id FROM tool_calls WHERE id = ?1",
-                params![id],
-                |r| r.get(0),
-            )
-            .optional()?;
         tx.execute(
-            "UPDATE tool_calls SET error = ?1, status = 'error', settled_at = ?3 WHERE id = ?2",
-            params![error, id, now],
+            "UPDATE tool_calls SET error = ?1, status = 'error', settled_at = ?3 WHERE session_id = ?4 AND id = ?2",
+            params![error, id, now, session_id],
         )?;
-        if let Some(sid) = session_id {
+        let session_known: bool = tx
+            .query_row(
+                "SELECT 1 FROM sessions WHERE id = ?1",
+                params![session_id],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if session_known {
+            let sid = session_id;
             let ev_seq: i64 = tx.query_row(
                 "SELECT COALESCE(MAX(seq), 0) + 1 FROM events WHERE session_id = ?1",
                 params![sid],
@@ -1288,9 +1339,9 @@ mod tests {
             Some("sig"),
         )
         .unwrap();
-        s.settle_tool_call("c1", &serde_json::json!({"ok": true}))
+        s.settle_tool_call("sess", "c1", &serde_json::json!({"ok": true}))
             .unwrap();
-        s.fail_tool_call("c2", "boom").unwrap();
+        s.fail_tool_call("sess", "c2", "boom").unwrap();
         let grouped = s.get_tool_calls_grouped_simple("sess").unwrap();
         let calls = grouped.get(&seq).expect("grouped by message seq");
         assert_eq!(calls.len(), 2);
@@ -1340,13 +1391,22 @@ mod tests {
             .unwrap();
         s.fork_session("p", "f", None).unwrap();
         assert_eq!(s.get_messages("f").unwrap().len(), 1);
-        // NOTE: tool_calls.id is a global PRIMARY KEY, so the fork's
-        // INSERT OR IGNORE silently drops copied calls whose ids exist
-        // in the parent. Flagged for phase 2 (fork loses tool history).
-        assert!(
-            s.get_tool_calls_grouped_simple("f").unwrap().is_empty(),
-            "documents current fork tool-call drop"
+        // Composite PK (session_id, id): forked tool calls survive alongside
+        // the parent's rows.
+        let forked_calls = s.get_tool_calls_grouped_simple("f").unwrap();
+        assert_eq!(
+            forked_calls.get(&seq).map(|v| v.len()),
+            Some(1),
+            "fork keeps tool history"
         );
+        // Settling inside the fork must not touch the parent's row.
+        s.settle_tool_call("f", "c1", &serde_json::json!({"ok": true}))
+            .unwrap();
+        let parent_calls = s.get_tool_calls_grouped("p").unwrap();
+        let prow = parent_calls.get(&seq).unwrap()[0].clone();
+        assert!(prow.4.is_none(), "parent result untouched by fork settle");
+        let fork_calls = s.get_tool_calls_grouped("f").unwrap();
+        assert!(fork_calls.get(&seq).unwrap()[0].4.is_some(), "fork settled");
         assert_eq!(s.get_todos("f").unwrap().len(), 1);
         let forked = s.get_session("f").unwrap().unwrap();
         assert_eq!(forked.parent_id.as_deref(), Some("p"));
@@ -1364,6 +1424,68 @@ mod tests {
         let msgs = s.get_messages("f").unwrap();
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].2, "one");
+    }
+
+    #[test]
+    fn migrate_003_rebuilds_legacy_tool_calls_pk() {
+        // Legacy DBs have id-only PK: fork drops tool history. Opening the
+        // DB must rebuild to (session_id, id) without losing rows.
+        let dir = std::env::temp_dir().join(format!("vh_mig3_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("legacy.db");
+        {
+            let con = rusqlite::Connection::open(&db).unwrap();
+            con.execute_batch(
+                "CREATE TABLE sessions (id TEXT PRIMARY KEY, created_at INTEGER NOT NULL, model TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active', title TEXT, updated_at INTEGER, cwd TEXT);
+                 CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, seq INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL);
+                 CREATE TABLE tool_calls (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, message_seq INTEGER NOT NULL, name TEXT NOT NULL, args TEXT NOT NULL, result TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at INTEGER, settled_at INTEGER);
+                 CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, type TEXT NOT NULL, payload TEXT NOT NULL, created_at INTEGER);",
+            )
+            .unwrap();
+            con.execute(
+                "INSERT INTO sessions (id, created_at, updated_at, model, status) VALUES ('p', 1, 2, 'm', 'active')",
+                [],
+            )
+            .unwrap();
+            con.execute(
+                "INSERT INTO messages (session_id, seq, role, content, created_at) VALUES ('p', 1, 'user', 'hi', 1)",
+                [],
+            )
+            .unwrap();
+            con.execute(
+                "INSERT INTO tool_calls (id, session_id, message_seq, name, args, status) VALUES ('c1', 'p', 1, 'read', '{}', 'pending')",
+                [],
+            )
+            .unwrap();
+        }
+        let s = SessionStore::new(db.to_str().unwrap()).unwrap();
+        let schema: String = s
+            .pool
+            .get()
+            .unwrap()
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE name = 'tool_calls'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(schema.contains("PRIMARY KEY (session_id, id)"), "{schema}");
+        // Legacy row survived and fork now keeps it.
+        s.fork_session("p", "f", None).unwrap();
+        let calls = s.get_tool_calls_grouped_simple("f").unwrap();
+        assert_eq!(calls.get(&1).map(|v| v.len()), Some(1));
+        // Reopening is a no-op (idempotent migration).
+        drop(s);
+        let s2 = SessionStore::new(db.to_str().unwrap()).unwrap();
+        assert_eq!(
+            s2.get_tool_calls_grouped_simple("f")
+                .unwrap()
+                .get(&1)
+                .map(|v| v.len()),
+            Some(1)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
