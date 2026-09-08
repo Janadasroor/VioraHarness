@@ -360,3 +360,31 @@ impl Provider for OpenRouterProvider {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn afford_limit_parsing() {
+        assert_eq!(
+            parse_afford_limit("you can only afford 128 tokens"),
+            Some(128)
+        );
+        assert_eq!(
+            parse_afford_limit("Error: Can Only Afford 4096 max"),
+            Some(4096)
+        );
+        assert_eq!(parse_afford_limit("insufficient credits"), None);
+        assert_eq!(parse_afford_limit(""), None);
+        assert_eq!(parse_afford_limit("can only afford nothing here"), None);
+    }
+
+    #[test]
+    fn constructors_do_not_require_env() {
+        let p = OpenRouterProvider::from_env();
+        assert_eq!(Provider::name(&p), "openrouter");
+        let p2 = OpenRouterProvider::new("k", "https://example.invalid");
+        assert_eq!(Provider::name(&p2), "openrouter");
+    }
+}

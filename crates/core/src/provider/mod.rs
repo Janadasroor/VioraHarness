@@ -175,3 +175,76 @@ pub fn provider_for_model(model: &str) -> Box<dyn Provider> {
         Box::new(openrouter::OpenRouterProvider::from_env())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn routing_is_strict_no_fallback() {
+        for m in [
+            "opencode/gpt-x",
+            "zen/claude-y",
+            "go/kimi-z",
+            "anything-free",
+        ] {
+            let p = provider_for_model(m);
+            assert!(
+                p.name() == "gateway" || p.name() == "gateway-go",
+                "{m} -> {}",
+                p.name()
+            );
+        }
+        for m in [
+            "google/gemini-2.0-flash",
+            "gemini-2.0-flash",
+            "gemini-flash-lite",
+            "x-gemini-y",
+        ] {
+            assert_eq!(provider_for_model(m).name(), "gemini", "{m}");
+        }
+        for m in [
+            "openai/gpt-4o",
+            "anthropic/claude-sonnet",
+            "mystery/model-1",
+            "",
+        ] {
+            assert_eq!(provider_for_model(m).name(), "openrouter", "{m}");
+        }
+    }
+
+    #[test]
+    fn chat_message_image_shape() {
+        let m = ChatMessage::with_image_mime("user", "see this", "image/png", "QUJD");
+        let arr = m.content.as_array().expect("multipart");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], serde_json::json!("text"));
+        let url = arr[1]["image_url"]["url"].as_str().unwrap();
+        assert!(url.starts_with("data:image/png;base64,"));
+        assert!(url.ends_with("QUJD"));
+        let m2 = ChatMessage::with_image("user", "t", "QUJD");
+        assert!(m2.content.to_string().contains("image/png"));
+    }
+
+    #[test]
+    fn content_len_and_str() {
+        let m = ChatMessage::text("user", "hello");
+        assert_eq!(m.content_as_str(), "hello");
+        assert_eq!(m.content_len(), 5);
+        let mut m2 = ChatMessage::text("assistant", "");
+        m2.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: "read".into(),
+                arguments: "{}".into(),
+            },
+            thought_signature: Some("sig".into()),
+        }]);
+        m2.tool_call_id = Some("c1".into());
+        m2.name = Some("read".into());
+        assert!(m2.content_len() > "read".len());
+        let img = ChatMessage::with_image("user", "t", "QUJD");
+        assert!(img.content_as_str().contains("image_url"));
+    }
+}

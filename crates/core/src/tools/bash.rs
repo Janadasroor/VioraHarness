@@ -202,22 +202,36 @@ pub async fn bash(args: Value) -> Value {
             }
 
             prune_old_logs();
-            let truncated = stdout_raw.len() > 7000;
-            let stdout = if truncated {
+            let stdout_cut = stdout_raw.len() > 7000;
+            let stdout = if stdout_cut {
                 format!(
                     "{}...(truncated, {} bytes total, full log: {})",
-                    &stdout_raw[..7000],
+                    super::viora::truncate_to_bytes(&stdout_raw, 7000),
                     stdout_raw.len(),
                     log_str
                 )
             } else {
                 stdout_raw.clone()
             };
+            let (stderr, stderr_cut) = if stderr_raw.len() > 7000 {
+                (
+                    format!(
+                        "{}...(stderr truncated, {} bytes total, full log: {})",
+                        super::viora::truncate_to_bytes(&stderr_raw, 7000),
+                        stderr_raw.len(),
+                        log_str
+                    ),
+                    true,
+                )
+            } else {
+                (stderr_raw.clone(), false)
+            };
+            let truncated = stdout_cut || stderr_cut;
             json!({
                 "ok": out.status.success(),
                 "code": code,
                 "stdout": stdout,
-                "stderr": stderr_raw,
+                "stderr": stderr,
                 "log": log_str,
                 "lines": lines,
                 "bytes": bytes,
@@ -264,5 +278,39 @@ mod tests {
         for cmd in ["nohup rm -rf /", "timeout 5 rm -rf /", "sudo rm -rf /"] {
             assert!(is_annihilation(cmd), "wrapped annihilation: {cmd}");
         }
+    }
+
+    #[tokio::test]
+    async fn stdout_cut_never_splits_multibyte_chars() {
+        // P0 #4: `&stdout[..7000]` panicked when byte 7000 landed in ｱ (3 bytes).
+        let r = bash(json!({"command": "python3 -c \"print('A'*6999 + 'ｱ' + 'B'*8000)\""})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["truncated"], true);
+        assert!(r["stdout"].as_str().unwrap().contains("truncated"));
+        assert!(!r["log"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn katakana_round_trips_through_log() {
+        // P0 #4: log bytes must be exact UTF-8 (viewers showing M-o are at fault, not us).
+        let r = bash(json!({"command": "printf 'MATRIX \\xef\\xbd\\xa1\\xef\\xbd\\xb2\\n'"})).await;
+        assert_eq!(r["ok"], true);
+        let log = r["log"].as_str().unwrap().to_string();
+        let bytes = std::fs::read(&log).unwrap();
+        assert!(
+            bytes.windows(3).any(|w| w == [0xef, 0xbd, 0xa1]),
+            "ｱ intact: {bytes:02x?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn huge_stderr_is_capped() {
+        let r = bash(json!({"command": "python3 -c \"import sys; sys.stderr.write('E'*20000)\""}))
+            .await;
+        assert_eq!(r["ok"], true);
+        let stderr = r["stderr"].as_str().unwrap();
+        assert!(stderr.len() <= 7300, "capped: {}", stderr.len());
+        assert!(stderr.contains("stderr truncated"), "{stderr}");
+        assert_eq!(r["truncated"], true);
     }
 }

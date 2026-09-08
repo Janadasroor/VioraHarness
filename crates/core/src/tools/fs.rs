@@ -403,7 +403,7 @@ pub async fn glob_files(args: Value) -> Value {
     }
 
     let mut out = Vec::new();
-    let _ = walk_glob(&base, pattern, &mut out, 0).await;
+    let _ = walk_glob(&base, &base, pattern, &mut out, 0).await;
 
     if out.len() > 100 {
         out.truncate(100);
@@ -411,7 +411,13 @@ pub async fn glob_files(args: Value) -> Value {
     json!({"ok": true, "pattern": pattern, "files": out, "truncated": out.len() >= 100})
 }
 
-async fn walk_glob(dir: &PathBuf, pattern: &str, out: &mut Vec<String>, depth: usize) {
+async fn walk_glob(
+    base: &PathBuf,
+    dir: &PathBuf,
+    pattern: &str,
+    out: &mut Vec<String>,
+    depth: usize,
+) {
     if depth > 8 {
         return;
     }
@@ -431,31 +437,89 @@ async fn walk_glob(dir: &PathBuf, pattern: &str, out: &mut Vec<String>, depth: u
             {
                 continue;
             }
-            Box::pin(walk_glob(&p, pattern, out, depth + 1)).await;
-        } else if glob_match(&name, pattern) {
-            let display = p.to_string_lossy().to_string();
-            out.push(display);
-            if out.len() >= 120 {
-                break;
+            if let Ok(rel) = p.strip_prefix(base) {
+                if glob_match_path(&rel.to_string_lossy(), pattern) {
+                    out.push(p.to_string_lossy().to_string());
+                    if out.len() >= 120 {
+                        return;
+                    }
+                }
+            }
+            Box::pin(walk_glob(base, &p, pattern, out, depth + 1)).await;
+        } else if let Ok(rel) = p.strip_prefix(base) {
+            if glob_match_path(&rel.to_string_lossy(), pattern) {
+                let display = p.to_string_lossy().to_string();
+                out.push(display);
+                if out.len() >= 120 {
+                    break;
+                }
             }
         }
     }
 }
 
-fn glob_match(name: &str, pattern: &str) -> bool {
-    if pattern.contains('*') {
-        let parts: Vec<&str> = pattern.split('*').collect();
-        if parts.len() == 2 {
-            return name.starts_with(parts[0]) && name.ends_with(parts[1]);
+/// Segment-aware glob: `*` spans within one path segment, `?` one char,
+/// `**` spans any number of segments. A pattern without `/` matches the
+/// basename at any depth (`*.cir` finds nested files too).
+fn segment_match(seg: &str, pat: &str) -> bool {
+    let s: Vec<char> = seg.chars().collect();
+    let p: Vec<char> = pat.chars().collect();
+    let (mut si, mut pi) = (0, 0);
+    let (mut star, mut mark) = (None, 0);
+    while si < s.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == s[si]) {
+            si += 1;
+            pi += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some(pi);
+            mark = si;
+            pi += 1;
+        } else if let Some(st) = star {
+            pi = st + 1;
+            mark += 1;
+            si = mark;
+        } else {
+            return false;
         }
-
-        return name.contains(&pattern.replace('*', ""));
     }
-
-    if pattern.starts_with("*.") {
-        return name.ends_with(&pattern[1..]);
+    while pi < p.len() && p[pi] == '*' {
+        pi += 1;
     }
-    name.contains(pattern)
+    pi == p.len()
+}
+
+fn match_segments(path: &[&str], pat: &[&str]) -> bool {
+    if pat.is_empty() {
+        return path.is_empty();
+    }
+    if pat[0] == "**" {
+        if pat.len() == 1 {
+            return true;
+        }
+        return (0..=path.len()).any(|i| match_segments(&path[i..], &pat[1..]));
+    }
+    if path.is_empty() {
+        return false;
+    }
+    segment_match(path[0], pat[0]) && match_segments(&path[1..], &pat[1..])
+}
+
+fn glob_match_path(rel: &str, pattern: &str) -> bool {
+    let pat = pattern.trim().trim_start_matches("./");
+    if pat.is_empty() {
+        return false;
+    }
+    if !pat.contains('/') {
+        let name = rel.rsplit('/').next().unwrap_or(rel);
+        return segment_match(name, pat);
+    }
+    let psegs: Vec<&str> = pat.split('/').collect();
+    let rsegs: Vec<&str> = rel.split('/').collect();
+    match_segments(&rsegs, &psegs)
+}
+
+fn glob_match(name: &str, pattern: &str) -> bool {
+    glob_match_path(name, pattern)
 }
 
 pub async fn grep(args: Value) -> Value {
@@ -469,7 +533,7 @@ pub async fn grep(args: Value) -> Value {
     if !super::viora::approved_call() && !is_within_root(&base) {
         return json!({"ok": false, "error": format!("access denied: {} outside project root (approve in the Ask dialog or run with -y to allow external access)", base.display())});
     }
-    let rg = tokio::process::Command::new("rg")
+    match tokio::process::Command::new("rg")
         .args([
             "--json",
             "--no-heading",
@@ -478,9 +542,21 @@ pub async fn grep(args: Value) -> Value {
             base.to_string_lossy().as_ref(),
         ])
         .output()
-        .await;
-    if let Ok(out) = rg {
-        if out.status.success() || !out.stdout.is_empty() {
+        .await
+    {
+        Ok(out) => {
+            // rg exit 0 = matches, 1 = no matches; other codes = real error.
+            if !out.status.success() && out.status.code() != Some(1) {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let msg = err
+                    .lines()
+                    .next()
+                    .unwrap_or("search failed")
+                    .trim()
+                    .to_string();
+                return json!({"ok": false, "error": format!("rg search failed: {msg}"), "pattern": pattern, "hits": []});
+            }
+            // rg answered (matches or clean no-match).
             let text = String::from_utf8_lossy(&out.stdout);
             let mut hits = Vec::new();
             for line in text.lines() {
@@ -510,11 +586,53 @@ pub async fn grep(args: Value) -> Value {
                     }
                 }
             }
-            return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100});
+            return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100, "backend": "rg"});
         }
+        Err(_) => {}
     }
 
-    json!({"ok": true, "pattern": pattern, "hits": [], "note": "rg not available, no hits"})
+    // Fallback when rg is not installed: system grep -R. Same shape.
+    // grep exit 0 = matches, 1 = no matches; spawn error = no grep either.
+    match tokio::process::Command::new("grep")
+        .args(["-RnI", "--", pattern, base.to_string_lossy().as_ref()])
+        .output()
+        .await
+    {
+        Ok(out) => {
+            // grep exit 0 = matches, 1 = no matches; other codes = real error.
+            if !out.status.success() && out.status.code() != Some(1) {
+                let err = String::from_utf8_lossy(&out.stderr);
+                let msg = err
+                    .lines()
+                    .next()
+                    .unwrap_or("search failed")
+                    .trim()
+                    .to_string();
+                return json!({"ok": false, "error": format!("grep search failed: {msg}"), "pattern": pattern, "hits": []});
+            }
+            let text = String::from_utf8_lossy(&out.stdout);
+            let mut hits = Vec::new();
+            for line in text.lines() {
+                let mut parts = line.splitn(3, ':');
+                let (Some(path), Some(no), Some(text)) = (parts.next(), parts.next(), parts.next())
+                else {
+                    continue;
+                };
+                let line_no = no.parse::<u64>().unwrap_or(0);
+                if line_no == 0 {
+                    continue;
+                }
+                hits.push(json!({"path": path, "line": line_no, "text": text.trim_end()}));
+                if hits.len() >= 100 {
+                    break;
+                }
+            }
+            return json!({"ok": true, "pattern": pattern, "hits": hits, "truncated": hits.len() >= 100, "backend": "grep"});
+        }
+        Err(_) => {}
+    }
+
+    json!({"ok": false, "error": "no search backend available (tried `rg` and `grep -R`; install ripgrep for best results)", "pattern": pattern, "hits": []})
 }
 
 pub async fn read_image_base64(args: Value) -> Value {
@@ -540,6 +658,86 @@ pub async fn read_image_base64(args: Value) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn glob_double_star_spans_directories() {
+        // P0 #1: `**/*` and `**/*.js` returned nothing.
+        assert!(glob_match_path("app.js", "**/*"));
+        assert!(glob_match_path("sub/inner.js", "**/*"));
+        assert!(glob_match_path("sub/inner.js", "**/*.js"));
+        assert!(glob_match_path("app.js", "*.js"));
+        assert!(
+            glob_match_path("sub/inner.js", "*.js"),
+            "basename at any depth"
+        );
+        assert!(glob_match_path("anything", "*"));
+        assert!(glob_match_path("sub/deck.cir", "sub/*.cir"));
+        assert!(!glob_match_path("other/deck.cir", "sub/*.cir"));
+        assert!(glob_match_path("ab", "a?"));
+        assert!(!glob_match_path("app.js", "*.cir"));
+        assert!(!glob_match_path("app.js", ""));
+        assert!(glob_match_path("app.js", "app.js"));
+        assert!(
+            !glob_match_path("myapp.js", "app.js"),
+            "exact, not contains"
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_end_to_end_nested() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_APPROVED_CALL").ok();
+        std::env::set_var("VIORAHARNESS_APPROVED_CALL", "1");
+        let dir = std::env::temp_dir().join(format!("vh-glob2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        std::fs::write(dir.join("app.js"), "x").unwrap();
+        std::fs::write(dir.join("sub").join("inner.js"), "y").unwrap();
+        let d = dir.to_string_lossy().to_string();
+        let r = glob_files(json!({"path": d, "pattern": "**/*.js"})).await;
+        assert_eq!(r["ok"], true);
+        assert_eq!(r["files"].as_array().unwrap().len(), 2, "{r}");
+        let r = glob_files(json!({"path": d, "pattern": "sub/*.js"})).await;
+        assert_eq!(r["files"].as_array().unwrap().len(), 1, "{r}");
+        let _ = std::fs::remove_dir_all(&dir);
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_APPROVED_CALL", v),
+            None => std::env::remove_var("VIORAHARNESS_APPROVED_CALL"),
+        }
+    }
+
+    #[tokio::test]
+    async fn grep_falls_back_without_rg() {
+        // P0 #2/#9: must return hits via system grep, never silent ok:true.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_APPROVED_CALL").ok();
+        std::env::set_var("VIORAHARNESS_APPROVED_CALL", "1");
+        let dir = std::env::temp_dir().join(format!("vh-grep2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello APPS world\n").unwrap();
+        let d = dir.to_string_lossy().to_string();
+        let r = grep(json!({"path": d, "pattern": "APPS"})).await;
+        assert_eq!(r["ok"], true, "{r}");
+        let hits = r["hits"].as_array().unwrap();
+        assert_eq!(hits.len(), 1, "{r}");
+        assert_eq!(hits[0]["line"], 1);
+        assert!(hits[0]["text"].as_str().unwrap().contains("APPS"));
+        assert!(r["backend"]
+            .as_str()
+            .is_some_and(|b| b == "rg" || b == "grep"));
+        let r = grep(json!({"path": d, "pattern": "zzz-no-match"}).clone()).await;
+        assert_eq!(
+            r["ok"], true,
+            "no match is ok:true with empty hits, not an error"
+        );
+        assert!(r["hits"].as_array().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_APPROVED_CALL", v),
+            None => std::env::remove_var("VIORAHARNESS_APPROVED_CALL"),
+        }
+    }
 
     fn test_file(name: &str, content: &str) -> (std::path::PathBuf, String) {
         let dir = std::env::temp_dir().join(format!("vh-edit-{name}-{}", std::process::id()));

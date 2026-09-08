@@ -393,4 +393,98 @@ mod tests {
         )
         .is_err());
     }
+    #[test]
+    fn tool_scoped_rules_filter_by_tool() {
+        let rules = vec![
+            Rule::new(Decision::Allow, "*").for_tool("read"),
+            Rule::new(Decision::Deny, "*").for_tool("bash"),
+        ];
+        assert_eq!(decide(&rules, "read", "read /etc/passwd"), Decision::Allow);
+        assert_eq!(
+            decide(&rules, "bash", r#"{"command":"ls"}"#),
+            Decision::Deny
+        );
+        assert_eq!(decide(&rules, "write", "write x"), Decision::Ask);
+    }
+    #[test]
+    fn decide_extracts_command_file_cmd_keys() {
+        let rules = vec![Rule::new(Decision::Deny, "bash rm*")];
+        assert_eq!(
+            decide(&rules, "bash", r#"{"command":"rm -rf /tmp/x"}"#),
+            Decision::Deny
+        );
+        assert_eq!(
+            decide(&rules, "bash", r#"{"command":"ls /tmp"}"#),
+            Decision::Ask
+        );
+        let rules = vec![Rule::new(Decision::Allow, "*.cir")];
+        assert_eq!(
+            decide(&rules, "read", r#"{"file":"deck.cir"}"#),
+            Decision::Allow
+        );
+        let rules = vec![Rule::new(Decision::Deny, "rm*")];
+        assert_eq!(
+            decide(&rules, "viora", r#"{"cmd":"rm -rf /"}"#),
+            Decision::Deny
+        );
+    }
+    #[test]
+    fn decide_falls_back_to_raw_args_text() {
+        let rules = vec![Rule::new(Decision::Deny, "*rm -rf /*")];
+        assert_eq!(
+            decide(&rules, "bash", "not json at all rm -rf / nope"),
+            Decision::Deny
+        );
+        let rules = vec![Rule::new(Decision::Allow, "read *")];
+        assert_eq!(decide(&rules, "read", "whatever"), Decision::Allow);
+    }
+    #[test]
+    fn decision_from_str_roundtrip() {
+        for (s, d) in [
+            ("allow", Decision::Allow),
+            ("ASK", Decision::Ask),
+            ("Deny", Decision::Deny),
+        ] {
+            assert_eq!(s.parse::<Decision>().unwrap(), d);
+        }
+        assert!("sometimes".parse::<Decision>().is_err());
+        assert!("".parse::<Decision>().is_err());
+    }
+    #[test]
+    fn rules_from_json_shapes() {
+        let v = serde_json::json!({"bash ls*": "allow", "bash rm*": "deny", "weird": 42});
+        let rules = rules_from_json(&v);
+        assert_eq!(rules.len(), 3);
+        assert_eq!(
+            decide(&rules, "bash", r#"{"command":"ls /tmp"}"#),
+            Decision::Allow
+        );
+        assert_eq!(
+            decide(&rules, "bash", r#"{"command":"rm x"}"#),
+            Decision::Deny
+        );
+        let bogus = rules_from_json(&serde_json::json!({"*": "maybe"}));
+        assert_eq!(decide(&bogus, "read", "read x"), Decision::Ask);
+        assert!(rules_from_json(&serde_json::json!([1, 2])).is_empty());
+    }
+    #[test]
+    fn pending_map_resolves_once() {
+        let mut m = PendingMap::new();
+        let (tx, rx) = oneshot::channel();
+        m.insert("id-1".into(), tx);
+        assert!(m.resolve("id-1", Decision::Allow));
+        assert!(!m.resolve("id-1", Decision::Deny), "second resolve fails");
+        assert!(!m.resolve("missing", Decision::Allow));
+        assert_eq!(rx.blocking_recv().unwrap(), Decision::Allow);
+    }
+    #[test]
+    fn wildcard_multi_star_edges() {
+        assert!(wildcard_match("*", "anything at all"));
+        assert!(wildcard_match("a*b*c", "aXXbYYc"));
+        assert!(!wildcard_match("a*b*c", "aXXcYYb"));
+        assert!(wildcard_match("*mid*", "has mid inside"));
+        assert!(!wildcard_match("pre*post", "post-pre"));
+        assert!(wildcard_match("exact", "exact"));
+        assert!(!wildcard_match("exact", "exact+"));
+    }
 }

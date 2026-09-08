@@ -38,7 +38,7 @@ impl ToolRegistry {
     }
 
     fn register_defaults(&mut self) {
-        self.register("read", "Read a file from the project (ROOT-jailed, supports offset/limit, truncates >2000 lines). Image files (.png/.jpg/.gif/.webp) return vision instead of text — use read on the image path to SEE it. Use path \"screenshot:latest\" (or \"last screenshot\") for the newest screenshot in ~/Pictures.", json!({
+        self.register("read", "Read a file from the project (ROOT-jailed). Paginate big files with offset/limit (0-indexed lines). Caps: 2000 lines per call; the model-visible result is further capped (~8k chars, full JSON saved to /tmp for `cat`). Image files (.png/.jpg/.gif/.webp) return vision instead of text — use read on the image path to SEE it. Use path \"screenshot:latest\" (or \"last screenshot\") for the newest screenshot in ~/Pictures.", json!({
             "type":"object","properties":{
                 "path":{"type":"string","description":"relative path"},
                 "offset":{"type":"integer","description":"line offset (0-indexed) to start reading from"},
@@ -48,10 +48,10 @@ impl ToolRegistry {
         self.register("write", "Write a file (creates parent dirs, ROOT-jailed)", json!({
             "type":"object","properties":{"path":{"type":"string"},"content":{"type":"string"}},"required":["path","content"]
         }));
-        self.register("glob", "Find files by glob pattern (limit 100)", json!({
+        self.register("glob", "Find files by glob pattern (limit 100). `path` is the base directory to search under (default project root). `*` spans within a segment, `?` one char, `**` spans directories — e.g. `**/*.cir` finds nested files.", json!({
             "type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]
         }));
-        self.register("grep", "Search for pattern (ripgrep, limit 100)", json!({
+        self.register("grep", "Search file contents (ripgrep if present, else system grep -R; limit 100). `path` is the base directory. Returns ok:false only when no search backend exists.", json!({
             "type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]
         }));
         self.register("bash", "Run bash command (offscreen QPA, timeout 120s). Pass background:true for long builds/tests/servers: detaches immediately with a task_id (output streams to its log) instead of blocking — check /tasks, then read/grep the log; never re-run to poll.", json!({
@@ -297,5 +297,94 @@ impl ToolRegistry {
 
     pub fn add_tool(&mut self, def: ToolDef) {
         self.tools.push(def);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn names(r: &ToolRegistry) -> Vec<&str> {
+        r.all().iter().map(|t| t.name.as_str()).collect()
+    }
+
+    #[test]
+    fn defaults_cover_core_and_viora_tools() {
+        let r = ToolRegistry::new();
+        let n = names(&r);
+        for must in [
+            "read",
+            "write",
+            "glob",
+            "grep",
+            "bash",
+            "edit",
+            "apply_patch",
+            "todowrite",
+            "question",
+            "task",
+            "skill",
+            "webfetch",
+            "websearch",
+            "viora",
+            "netlist_run",
+            "schematic_render",
+            "erc",
+        ] {
+            assert!(n.contains(&must), "missing tool: {must}");
+        }
+        let mut sorted = n.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), n.len(), "duplicate tool names");
+    }
+
+    #[test]
+    fn schemas_are_well_formed() {
+        let r = ToolRegistry::new();
+        for t in r.all() {
+            assert_eq!(
+                t.schema.get("type").and_then(|v| v.as_str()),
+                Some("object"),
+                "{}",
+                t.name
+            );
+            assert!(
+                t.schema
+                    .get("required")
+                    .and_then(|v| v.as_array())
+                    .is_some(),
+                "{}",
+                t.name
+            );
+            assert!(!t.description.trim().is_empty(), "{}", t.name);
+        }
+    }
+
+    #[test]
+    fn visible_tools_filters() {
+        let r = ToolRegistry::new();
+        assert_eq!(r.visible_tools(None).len(), r.all().len());
+        let sub = r.visible_tools(Some(&["read".to_string(), "bash".to_string()]));
+        assert_eq!(sub.len(), 2);
+        let none = r.visible_tools(Some(&["nope".to_string()]));
+        assert!(none.is_empty());
+    }
+
+    #[test]
+    fn provider_shape_and_add() {
+        let mut r = ToolRegistry::new_empty();
+        assert!(r.all().is_empty());
+        r.add_tool(ToolDef {
+            name: "x".into(),
+            description: "d".into(),
+            schema: json!({"type": "object"}),
+        });
+        let pt = r.to_provider_tools();
+        assert_eq!(pt.len(), 1);
+        assert_eq!(pt[0].call_type, "function");
+        assert_eq!(pt[0].function.name, "x");
+        let full = ToolRegistry::new().to_provider_tools();
+        assert_eq!(full.len(), ToolRegistry::new().all().len());
     }
 }

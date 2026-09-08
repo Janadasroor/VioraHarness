@@ -286,8 +286,25 @@ pub fn apply_hunks(old: &[String], hunks: &[Hunk]) -> Result<Vec<String>, String
                 .cloned()
                 .collect::<Vec<_>>()
                 .join("\n");
+            // Orient the caller: where does the hunk's first line occur, if at all?
+            let anchor_hint = old_block.first().map(|first| {
+                let at: Vec<usize> = cur
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, l)| l == first)
+                    .map(|(i, _)| i + 1)
+                    .take(4)
+                    .collect();
+                if at.is_empty() {
+                    format!(
+                        " (first expected line occurs nowhere in the file — it may differ by whitespace/encoding; `read` the exact lines)"
+                    )
+                } else {
+                    format!(" (first expected line occurs at file line(s) {})", at.iter().map(|n| n.to_string()).collect::<Vec<_>>().join(", "))
+                }
+            }).unwrap_or_default();
             return Err(format!(
-                "hunk {} does not match (exact, no fuzz). First expected lines:\n{preview}\nHint: read the file and include 3+ lines of ' ' context.",
+                "hunk {} does not match (exact, no fuzz). First expected lines:\n{preview}\nHint: read the file and include 3+ lines of ' ' context.{anchor_hint}",
                 hi + 1
             ));
         }
@@ -666,5 +683,45 @@ mod tests {
         assert_eq!(new[0], "b1");
         assert_eq!(new[8], "b9");
         assert_eq!(new.len(), 10);
+    }
+
+    #[test]
+    fn mismatch_hint_points_at_anchor_line() {
+        // P0 #5: when the hunk fails, orient the caller with the closest match.
+        // Exact matching is encoding-agnostic (katakana lines match byte-wise).
+        let ops = parse_patch(
+            "*** Begin Patch\n*** Update File: f.js\n@@\n if(mcan) resizeMatrix();\n-bbb\n+BBB\n*** End Patch",
+        )
+        .unwrap();
+        let hunks = match &ops[0] {
+            FileOp::Update { hunks, .. } => hunks.clone(),
+            _ => unreachable!(),
+        };
+        let new = apply_hunks(
+            &["if(mcan) resizeMatrix();".to_string(), "bbb".to_string()],
+            &hunks,
+        )
+        .unwrap();
+        assert_eq!(new, vec!["if(mcan) resizeMatrix();", "BBB"]);
+
+        // Trailing comment differs → mismatch, and the bare line is absent.
+        let err = apply_hunks(
+            &[
+                "if(mcan) resizeMatrix(); // ｱｲｳ".to_string(),
+                "bbb".to_string(),
+            ],
+            &hunks,
+        )
+        .unwrap_err();
+        assert!(err.contains("does not match"), "{err}");
+        assert!(err.contains("occurs nowhere"), "{err}");
+
+        // Anchor present but block broken → hint names the file line.
+        let err2 = apply_hunks(
+            &["if(mcan) resizeMatrix();".to_string(), "zzz".to_string()],
+            &hunks,
+        )
+        .unwrap_err();
+        assert!(err2.contains("line(s) 1"), "{err2}");
     }
 }

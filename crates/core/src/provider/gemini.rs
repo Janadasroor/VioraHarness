@@ -430,3 +430,175 @@ impl Provider for GeminiProvider {
         Ok(out)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{ChatMessage, ToolCall};
+
+    fn req_with(messages: Vec<ChatMessage>) -> ChatRequest {
+        ChatRequest {
+            model: "gemini-test".into(),
+            messages,
+            tools: None,
+            tool_choice: None,
+            max_tokens: None,
+            temperature: None,
+        }
+    }
+
+    #[test]
+    fn converts_roles_and_system() {
+        let req = req_with(vec![
+            ChatMessage::text("system", "be nice"),
+            ChatMessage::text("user", "hi"),
+            ChatMessage::text("assistant", "hello"),
+        ]);
+        let body = openai_to_gemini(&req);
+        assert_eq!(
+            body["systemInstruction"]["parts"][0]["text"],
+            json!("be nice")
+        );
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0]["role"], json!("user"));
+        assert_eq!(contents[1]["role"], json!("model"));
+        assert!(body["generationConfig"]["thinkingConfig"]["includeThoughts"] == json!(true));
+    }
+
+    #[test]
+    fn converts_tool_calls_with_signature() {
+        let mut m = ChatMessage::text("assistant", "");
+        m.tool_calls = Some(vec![ToolCall {
+            id: "c1".into(),
+            call_type: "function".into(),
+            function: crate::provider::FunctionCall {
+                name: "read".into(),
+                arguments: r#"{"path":"f"}"#.into(),
+            },
+            thought_signature: Some("sig1".into()),
+        }]);
+        let tool_msg = ChatMessage {
+            role: "tool".into(),
+            content: json!({"ok": true}),
+            tool_calls: None,
+            tool_call_id: Some("c1".into()),
+            name: Some("read".into()),
+        };
+        let req = req_with(vec![m, tool_msg]);
+        let body = openai_to_gemini(&req);
+        let contents = body["contents"].as_array().unwrap();
+        assert_eq!(
+            contents[0]["parts"][0]["functionCall"]["name"],
+            json!("read")
+        );
+        assert_eq!(contents[0]["parts"][0]["thoughtSignature"], json!("sig1"));
+        assert_eq!(
+            contents[1]["parts"][0]["functionResponse"]["name"],
+            json!("read")
+        );
+        assert_eq!(contents[1]["role"], json!("user"));
+    }
+
+    #[test]
+    fn tools_become_declarations_and_drop_thinking() {
+        let mut req = req_with(vec![ChatMessage::text("user", "hi")]);
+        req.tools = Some(vec![crate::provider::ToolDefForProvider {
+            call_type: "function".into(),
+            function: crate::provider::ToolFunction {
+                name: "read".into(),
+                description: "d".into(),
+                parameters: json!({"type": "object"}),
+            },
+        }]);
+        let body = openai_to_gemini(&req);
+        assert_eq!(
+            body["tools"][0]["functionDeclarations"][0]["name"],
+            json!("read")
+        );
+        assert!(body["generationConfig"].get("thinkingConfig").is_none());
+    }
+
+    #[test]
+    fn vision_array_joins_text_parts() {
+        let m = ChatMessage::with_image("user", "see", "QUJD");
+        let req = req_with(vec![m]);
+        let body = openai_to_gemini(&req);
+        assert_eq!(body["contents"][0]["parts"][0]["text"], json!("see"));
+    }
+
+    #[test]
+    fn chunk_to_events_text_thought_and_call() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let chunk = json!({"candidates": [{"content": {"parts": [
+            {"text": "hello"},
+            {"text": "hmm", "thought": true},
+            {"functionCall": {"name": "read", "args": {"path": "f"}, "id": "k1"},
+             "thoughtSignature": "s1"},
+            {"functionCall": {"name": "glob", "args": {}}},
+        ]}}]});
+        gemini_chunk_to_events(&chunk, &tx);
+        let mut texts = vec![];
+        let mut thoughts = vec![];
+        let mut calls = vec![];
+        while let Ok(ev) = rx.try_recv() {
+            match ev {
+                ProviderEvent::TextDelta(t) => texts.push(t),
+                ProviderEvent::ReasoningDelta(t) => thoughts.push(t),
+                ProviderEvent::ToolCallDelta {
+                    id,
+                    name,
+                    args,
+                    thought_signature,
+                } => calls.push((id, name, args, thought_signature)),
+                _ => {}
+            }
+        }
+        assert_eq!(texts, vec!["hello"]);
+        assert_eq!(thoughts, vec!["hmm"]);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].0, "k1");
+        assert_eq!(calls[0].1, "read");
+        assert!(calls[0].2.contains("path"));
+        assert_eq!(calls[0].3.as_deref(), Some("s1"));
+        assert!(calls[1].0.starts_with("call_"), "missing id synthesized");
+        assert!(calls[1].3.is_none());
+    }
+
+    #[test]
+    fn chunk_to_events_ignores_shape_gaps() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        for chunk in [
+            json!({}),
+            json!({"candidates": []}),
+            json!({"candidates": [{}]}),
+            json!({"candidates": [{"content": {}}]}),
+        ] {
+            gemini_chunk_to_events(&chunk, &tx);
+        }
+        assert!(rx.try_recv().is_err(), "no events for empty shapes");
+    }
+
+    #[test]
+    fn pretty_error_shapes() {
+        let quota = r#"{"error": {"code": 429, "message": "Quota exceeded for metric", "details": [{"quotaMetric": "generativelanguage.googleapis.com/generate_content_free_tier_requests", "retryDelay": "34s"}]}}"#;
+        let msg = pretty_gemini_error(reqwest::StatusCode::TOO_MANY_REQUESTS, quota);
+        assert!(msg.contains("Quota exceeded"), "{msg}");
+        assert!(msg.contains("34s"), "{msg}");
+        let bad = r#"{"error": {"code": 400, "message": "thought_signature missing in history"}}"#;
+        let msg = pretty_gemini_error(reqwest::StatusCode::BAD_REQUEST, bad);
+        assert!(msg.starts_with("Gemini 400:"), "{msg}");
+        let msg = pretty_gemini_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom\nsecond");
+        assert_eq!(msg, "Gemini 500 Internal Server Error: boom");
+    }
+
+    #[test]
+    fn uuid_simple_is_hex_nondashed() {
+        let a = uuid_simple();
+        let b = uuid_simple();
+        assert!(!a.is_empty());
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+        assert!(!a.contains('-'));
+        let _ = b;
+    }
+}

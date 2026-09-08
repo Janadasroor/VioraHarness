@@ -143,3 +143,66 @@ impl SubagentPool {
         out
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ENV_LOCK;
+
+    #[test]
+    fn tool_allowance_per_kind() {
+        let explore = SubagentKind::Explore.allowed_tools().unwrap();
+        for t in ["read", "glob", "grep"] {
+            assert!(explore.contains(&t.to_string()), "{t}");
+        }
+        for t in ["write", "edit", "apply_patch", "bash", "task"] {
+            assert!(
+                !explore.contains(&t.to_string()),
+                "explore must not have {t}"
+            );
+        }
+        assert!(SubagentKind::Planner.allowed_tools().is_none());
+        assert!(SubagentKind::Coder.allowed_tools().is_none());
+        let reviewer = SubagentKind::Reviewer.allowed_tools().unwrap();
+        assert!(reviewer.contains(&"read".to_string()));
+        assert!(!reviewer.contains(&"bash".to_string()));
+    }
+
+    #[test]
+    fn system_prompts_distinct_and_nonempty() {
+        let texts = [
+            SubagentKind::Explore.system_extra(),
+            SubagentKind::Planner.system_extra(),
+            SubagentKind::Coder.system_extra(),
+            SubagentKind::Reviewer.system_extra(),
+        ];
+        for t in texts {
+            assert!(!t.trim().is_empty());
+        }
+        let mut uniq = texts.to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert_eq!(uniq.len(), 4);
+        assert!(SubagentKind::Explore.system_extra().contains("Read-only"));
+    }
+
+    #[tokio::test]
+    async fn default_model_env_override_wins() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_SUBAGENT_MODEL").ok();
+        std::env::set_var("VIORAHARNESS_SUBAGENT_MODEL", "test/model-x");
+        assert_eq!(
+            SubagentKind::Explore.default_model_dynamic().await.unwrap(),
+            "test/model-x"
+        );
+        assert_eq!(
+            SubagentKind::Coder.default_model_dynamic().await.unwrap(),
+            "test/model-x",
+            "override applies to all kinds"
+        );
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_SUBAGENT_MODEL", v),
+            None => std::env::remove_var("VIORAHARNESS_SUBAGENT_MODEL"),
+        }
+    }
+}

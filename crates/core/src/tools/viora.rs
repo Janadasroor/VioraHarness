@@ -70,7 +70,7 @@ pub struct VioraOutput {
     pub data: Option<Value>,
 }
 
-fn extract_json_maybe(out: &str) -> Option<Value> {
+pub(crate) fn extract_json_maybe(out: &str) -> Option<Value> {
     if out.trim().is_empty() {
         return None;
     }
@@ -363,4 +363,150 @@ pub fn is_within_root(path: &Path) -> bool {
     }
 
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ENV_LOCK;
+
+    #[test]
+    fn extract_json_shapes() {
+        assert_eq!(
+            extract_json_maybe(r#"{"ok":true,"n":1}"#).unwrap()["n"],
+            serde_json::json!(1)
+        );
+        let mixed = "INFO booting\nWARN slow\n{\"ok\":true}\nbye\n";
+        assert_eq!(
+            extract_json_maybe(mixed).unwrap()["ok"],
+            serde_json::json!(true)
+        );
+        assert!(extract_json_maybe("").is_none());
+        assert!(extract_json_maybe("   ").is_none());
+        assert!(extract_json_maybe("no braces here").is_none());
+        assert!(extract_json_maybe("{not json}").is_none());
+        assert!(extract_json_maybe("} backwards {").is_none());
+    }
+
+    #[test]
+    fn normalize_portable_battery() {
+        assert_eq!(normalize_portable("a\\b\\c"), "a/b/c");
+        assert_eq!(normalize_portable("./a/./b"), "a/b");
+        assert_eq!(normalize_portable("a/b/../c"), "a/c");
+        assert_eq!(normalize_portable("/x/../y"), "/y");
+        assert_eq!(normalize_portable(""), ".");
+        assert_eq!(normalize_portable("."), ".");
+        assert_eq!(normalize_portable("a//b"), "a/b");
+    }
+
+    #[test]
+    fn relativize_under_base() {
+        assert_eq!(
+            relativize_if_under_base(Path::new("/base/sub/f.cir"), "/base"),
+            "sub/f.cir"
+        );
+        assert_eq!(
+            relativize_if_under_base(Path::new("/base/sub/f.cir"), "/base/"),
+            "sub/f.cir"
+        );
+        assert_eq!(
+            relativize_if_under_base(Path::new("/other/f.cir"), "/base"),
+            "/other/f.cir"
+        );
+        assert_eq!(
+            relativize_if_under_base(Path::new("/baseother/f"), "/base"),
+            "/baseother/f",
+            "prefix without slash boundary must not relativize"
+        );
+    }
+
+    #[test]
+    fn resolve_path_home_and_relative() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/home/tester");
+        assert_eq!(
+            resolve_path("~/docs/f.cir"),
+            PathBuf::from("/home/tester/docs/f.cir")
+        );
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let cwd = std::env::current_dir().unwrap();
+        assert_eq!(resolve_path("rel/f.cir"), cwd.join("rel/f.cir"));
+        assert_eq!(resolve_path("/abs/f.cir"), PathBuf::from("/abs/f.cir"));
+    }
+
+    #[test]
+    fn approved_call_variants() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_APPROVED_CALL").ok();
+        for v in ["1", "true", "TRUE", "yes", "Yes"] {
+            std::env::set_var("VIORAHARNESS_APPROVED_CALL", v);
+            assert!(approved_call(), "truthy: {v}");
+        }
+        for v in ["0", "false", "no", ""] {
+            std::env::set_var("VIORAHARNESS_APPROVED_CALL", v);
+            assert!(!approved_call(), "falsy: {v}");
+        }
+        std::env::remove_var("VIORAHARNESS_APPROVED_CALL");
+        assert!(!approved_call());
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_APPROVED_CALL", v),
+            None => std::env::remove_var("VIORAHARNESS_APPROVED_CALL"),
+        }
+    }
+
+    #[test]
+    fn resolve_viora_env_wins() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORA_BIN").ok();
+        std::env::set_var("VIORA_BIN", "/custom/path/viora");
+        assert_eq!(resolve_viora(), "/custom/path/viora");
+        match prev {
+            Some(v) => std::env::set_var("VIORA_BIN", v),
+            None => std::env::remove_var("VIORA_BIN"),
+        }
+    }
+
+    #[test]
+    fn within_root_basics() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let cwd = std::env::current_dir().unwrap();
+        assert!(is_within_root(&cwd.join("sub/file.cir")));
+        assert!(is_within_root(Path::new("/tmp/anything.txt")));
+        assert!(!is_within_root(Path::new("/etc/passwd")));
+        assert!(!is_within_root(Path::new("/home/someone-else/x")));
+    }
+}
+
+/// Truncate to at most `max_bytes` bytes without splitting a UTF-8 char
+/// (plain byte slicing / `String::truncate` panic on multi-byte text).
+pub fn truncate_to_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut end = max_bytes.min(s.len());
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    s[..end].to_string()
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_to_bytes;
+
+    #[test]
+    fn never_splits_multibyte_chars() {
+        // ｱ is 3 bytes at 6999..7002; byte 7000 lands inside it.
+        let s = "A".repeat(6999) + "ｱ" + &"B".repeat(8000);
+        let t = truncate_to_bytes(&s, 7000);
+        assert_eq!(t, "A".repeat(6999), "backs up to the char boundary");
+        assert!(t.len() <= 7000);
+        assert_eq!(truncate_to_bytes("hi", 7000), "hi");
+        assert_eq!(truncate_to_bytes("", 0), "");
+        assert_eq!(truncate_to_bytes("éé", 3), "é");
+    }
 }

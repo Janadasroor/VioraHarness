@@ -22,6 +22,7 @@ pub fn assemble_context(prompt: &str) -> AssembledContext {
     system.push_str("Validate erc/drc before pcb-compose --auto-route when doing PCB work.\n");
     system.push_str("Edits: prefer the edit tool (exact old_string) or apply_patch (*** Begin Patch) over rewrite-via-write for small changes; both snapshot for /undo.\n");
     system.push_str("Plans: for multi-step work keep a todowrite list (one in_progress at a time, mark completed as you go). When genuinely ambiguous, ask the user with the question tool instead of guessing.\n");
+    system.push_str("Reads: every read tool result already shows the user a `path (N lines)` card. NEVER reproduce file contents in your replies — cite `path:line` instead and summarize. The user reads code themselves; pasting dumps wastes their context and attention.\n");
     system.push_str("Format: always close ``` code fences (every opener needs its closer); render comparison data as GFM pipe tables with a header row and a --- delimiter row.\n");
     system.push_str("CRITICAL: Bash tool ALWAYS saves full stdout+stderr to log file. Result JSON always contains `log` path + `lines` + `bytes` + `truncated` flag. You MUST notice this `log` field automatically — do not ignore it. If `truncated==true` or you need more than the 3-line preview, IMMEDIATELY use `read` with offset/limit or `grep` on that `log` path to get full data. Never re-run the same bash command to get data you can grep/read from log. This is automatic — check `log` after every bash.\n\n");
 
@@ -99,4 +100,38 @@ fn chrono_or_fallback() -> String {
         .output()
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|_| "unknown".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ENV_LOCK;
+
+    #[test]
+    fn system_covers_workflow_invariants() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = assemble_context("do pcb work");
+        for needle in [
+            "VioraHarness",
+            "Netlist-first",
+            "schematic_render",
+            "erc",
+            "todowrite",
+            "question tool",
+        ] {
+            assert!(ctx.system.contains(needle), "missing: {needle}");
+        }
+        assert!(ctx
+            .system
+            .contains(&std::env::current_dir().unwrap().display().to_string()));
+    }
+
+    #[test]
+    fn user_extra_has_platform_and_date() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let ctx = assemble_context("hi");
+        assert!(ctx.user_extra.contains("platform:"));
+        assert!(ctx.user_extra.contains(std::env::consts::OS));
+        assert!(ctx.user_extra.contains("date:"));
+    }
 }

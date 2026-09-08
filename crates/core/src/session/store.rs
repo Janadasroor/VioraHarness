@@ -5,6 +5,10 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Max snapshot rows kept per session (DB + `.vioraharness/snapshots/`).
+/// Undo/rewind history stays deep enough for real sessions; growth is bounded.
+pub const MAX_SNAPSHOTS_PER_SESSION: i64 = 50;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredSession {
     pub id: String,
@@ -32,6 +36,7 @@ pub struct StoredMessage {
     pub tool_call_id: Option<String>,
     pub created_at: i64,
     pub timestamp: Option<String>,
+    pub is_compaction: bool,
 }
 
 pub type ToolCallGrouped =
@@ -770,8 +775,12 @@ impl SessionStore {
     pub fn get_messages_detailed(&self, session_id: &str) -> Result<Vec<StoredMessage>> {
         let conn = self.pool.get()?;
         let _ = conn.execute("ALTER TABLE messages ADD COLUMN timestamp TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE messages ADD COLUMN is_compaction INTEGER DEFAULT 0",
+            [],
+        );
         let mut stmt = conn.prepare(
-            "SELECT seq, role, content, content_json, reasoning, model, tool_call_id, created_at, timestamp FROM messages WHERE session_id = ?1 ORDER BY seq ASC",
+            "SELECT seq, role, content, content_json, reasoning, model, tool_call_id, created_at, timestamp, is_compaction FROM messages WHERE session_id = ?1 ORDER BY seq ASC",
         )?;
         let rows = stmt.query_map(params![session_id], |r| {
             Ok(StoredMessage {
@@ -784,6 +793,7 @@ impl SessionStore {
                 tool_call_id: r.get(6)?,
                 created_at: r.get(7)?,
                 timestamp: r.get::<_, Option<String>>(8)?,
+                is_compaction: r.get::<_, Option<i64>>(9)?.unwrap_or(0) != 0,
             })
         })?;
         let mut out = Vec::new();
@@ -898,6 +908,26 @@ impl SessionStore {
             "INSERT INTO snapshots (session_id, message_seq, path, sha, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![session_id, seq, path, sha, content, now],
         )?;
+        // Bound per-session growth (#11): keep newest MAX_SNAPSHOTS_PER_SESSION
+        // rows; prune oldest first, including their on-disk copies.
+        let stale: Vec<(i64, i64)> = conn
+            .prepare(
+                "SELECT rowid, message_seq FROM snapshots WHERE session_id = ?1 ORDER BY rowid DESC LIMIT -1 OFFSET ?2",
+            )
+            .map(|mut stmt| {
+                stmt.query_map(params![session_id, MAX_SNAPSHOTS_PER_SESSION], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        for (rowid, old_seq) in stale {
+            let _ = conn.execute("DELETE FROM snapshots WHERE rowid = ?1", params![rowid]);
+            let dir =
+                std::path::PathBuf::from(format!(".vioraharness/snapshots/{session_id}/{old_seq}"));
+            let _ = std::fs::remove_dir_all(dir);
+        }
         Ok(())
     }
 
@@ -985,6 +1015,60 @@ impl SessionStore {
         Ok(out)
     }
 
+    pub fn get_snapshot_contents(&self, session_id: &str) -> Result<Vec<(i64, String, Vec<u8>)>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare(
+            "SELECT message_seq, path, content FROM snapshots WHERE session_id = ?1 ORDER BY message_seq ASC, rowid ASC",
+        )?;
+        let rows = stmt.query_map(params![session_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    /// Delete conversation rows after `target_seq` (rewind). Returns
+    /// (messages dropped, tool calls dropped). Events are kept, matching
+    /// `compact_replace` precedent (audit trail, never read for display).
+    pub fn delete_messages_after(
+        &self,
+        session_id: &str,
+        target_seq: i64,
+    ) -> Result<(usize, usize)> {
+        let conn = self.pool.get()?;
+        let msgs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND seq > ?2",
+            params![session_id, target_seq],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "DELETE FROM messages WHERE session_id = ?1 AND seq > ?2",
+            params![session_id, target_seq],
+        )?;
+        let calls: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM tool_calls WHERE session_id = ?1 AND message_seq > ?2",
+            params![session_id, target_seq],
+            |r| r.get(0),
+        )?;
+        conn.execute(
+            "DELETE FROM tool_calls WHERE session_id = ?1 AND message_seq > ?2",
+            params![session_id, target_seq],
+        )?;
+        Ok((msgs as usize, calls as usize))
+    }
+
+    pub fn delete_snapshots_after(&self, session_id: &str, target_seq: i64) -> Result<usize> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "DELETE FROM snapshots WHERE session_id = ?1 AND message_seq > ?2",
+            params![session_id, target_seq],
+        )?;
+        Ok(n)
+    }
+
     pub fn export_jsonl(&self, session_id: &str) -> Result<String> {
         let sess = self
             .get_session(session_id)?
@@ -1012,6 +1096,16 @@ impl SessionStore {
                 "model": m.model,
                 "tool_call_id": m.tool_call_id,
                 "created_at": m.created_at,
+            }))?);
+            out.push('\n');
+        }
+        // Todos are part of the auditable session state (#13).
+        for (content, status, priority) in self.get_todos(session_id).unwrap_or_default() {
+            out.push_str(&serde_json::to_string(&serde_json::json!({
+                "type": "todo",
+                "content": content,
+                "status": status,
+                "priority": priority,
             }))?);
             out.push('\n');
         }
@@ -1138,5 +1232,253 @@ mod tests {
         let got = s.latest_for_cwd("/x/proj/sub").expect("ok").expect("found");
         assert_eq!(got.id, "c");
         assert!(s.latest_for_cwd("/nowhere").expect("ok").is_none());
+    }
+
+    #[test]
+    fn messages_roundtrip_with_seq_and_details() {
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        assert!(s.get_messages("sess").unwrap().is_empty());
+        let q1 = s.append_message("sess", "user", "hello").unwrap();
+        let q2 = s
+            .append_message_full("sess", "assistant", "hi", None, Some("r"), Some("m"), None)
+            .unwrap();
+        assert_eq!((q1, q2), (1, 2));
+        let msgs = s.get_messages("sess").unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0], (1, "user".into(), "hello".into()));
+        let det = s.get_messages_detailed("sess").unwrap();
+        assert_eq!(det[1].reasoning.as_deref(), Some("r"));
+        assert_eq!(det[1].model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn tool_calls_record_settle_fail_grouped() {
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        let seq = s.append_message("sess", "assistant", "calling").unwrap();
+        s.record_tool_call("c1", "sess", seq, "read", &serde_json::json!({"path": "f"}))
+            .unwrap();
+        s.record_tool_call_with_sig(
+            "c2",
+            "sess",
+            seq,
+            "bash",
+            &serde_json::json!({"command": "ls"}),
+            Some("sig"),
+        )
+        .unwrap();
+        s.settle_tool_call("c1", &serde_json::json!({"ok": true}))
+            .unwrap();
+        s.fail_tool_call("c2", "boom").unwrap();
+        let grouped = s.get_tool_calls_grouped_simple("sess").unwrap();
+        let calls = grouped.get(&seq).expect("grouped by message seq");
+        assert_eq!(calls.len(), 2);
+        let c1 = calls.iter().find(|c| c.0 == "c1").unwrap();
+        assert_eq!(c1.1, "read");
+        assert!(c1.2.contains("path"));
+        let c2 = calls.iter().find(|c| c.0 == "c2").unwrap();
+        assert_eq!(c2.3.as_deref(), Some("sig"));
+    }
+
+    #[test]
+    fn todos_replace_and_read() {
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        assert!(s.get_todos("sess").unwrap().is_empty());
+        let n = s
+            .set_todos(
+                "sess",
+                &[
+                    ("a".into(), "in_progress".into(), Some("high".into())),
+                    ("b".into(), "pending".into(), None),
+                ],
+            )
+            .unwrap();
+        assert_eq!(n, 2);
+        let todos = s.get_todos("sess").unwrap();
+        assert_eq!(
+            todos[0],
+            ("a".into(), "in_progress".into(), Some("high".into()))
+        );
+        let n = s
+            .set_todos("sess", &[("c".into(), "completed".into(), None)])
+            .unwrap();
+        assert_eq!(n, 1, "replace, not merge");
+        assert_eq!(s.get_todos("sess").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn fork_copies_messages_tools_todos() {
+        let s = mem_store();
+        s.create_session_full("p", "m", Some("orig"), None, None, None, None, None)
+            .unwrap();
+        let seq = s.append_message("p", "user", "hi").unwrap();
+        s.record_tool_call("c1", "p", seq, "read", &serde_json::json!({}))
+            .unwrap();
+        s.set_todos("p", &[("t".into(), "pending".into(), None)])
+            .unwrap();
+        s.fork_session("p", "f", None).unwrap();
+        assert_eq!(s.get_messages("f").unwrap().len(), 1);
+        // NOTE: tool_calls.id is a global PRIMARY KEY, so the fork's
+        // INSERT OR IGNORE silently drops copied calls whose ids exist
+        // in the parent. Flagged for phase 2 (fork loses tool history).
+        assert!(
+            s.get_tool_calls_grouped_simple("f").unwrap().is_empty(),
+            "documents current fork tool-call drop"
+        );
+        assert_eq!(s.get_todos("f").unwrap().len(), 1);
+        let forked = s.get_session("f").unwrap().unwrap();
+        assert_eq!(forked.parent_id.as_deref(), Some("p"));
+        assert!(forked.title.unwrap().contains("fork"));
+        assert!(s.fork_session("missing", "f2", None).is_err());
+    }
+
+    #[test]
+    fn fork_at_seq_truncates_tail() {
+        let s = mem_store();
+        s.create_session("p", "m", None).unwrap();
+        s.append_message("p", "user", "one").unwrap();
+        s.append_message("p", "user", "two").unwrap();
+        s.fork_session("p", "f", Some(1)).unwrap();
+        let msgs = s.get_messages("f").unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].2, "one");
+    }
+
+    #[test]
+    fn compact_replace_drops_head_keeps_tail() {
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        for i in 0..5 {
+            s.append_message("sess", "user", &format!("m{i}")).unwrap();
+        }
+        let (dropped, kept) = s.compact_replace("sess", 4, "summary here").unwrap();
+        assert_eq!(dropped, 3);
+        assert_eq!(kept, 2);
+        let msgs = s.get_messages_detailed("sess").unwrap();
+        assert!(msgs.iter().any(|m| m.content == "summary here"));
+        assert!(msgs.iter().any(|m| m.content == "m3"));
+        assert!(!msgs.iter().any(|m| m.content == "m0"));
+    }
+
+    #[test]
+    fn archive_counts_and_rename_touch() {
+        let s = mem_store();
+        s.create_session("a", "m", None).unwrap();
+        s.create_session("b", "m", None).unwrap();
+        assert_eq!(s.count_sessions(false).unwrap(), 2);
+        s.archive_session("a").unwrap();
+        assert_eq!(s.count_sessions(false).unwrap(), 1);
+        assert_eq!(s.count_sessions(true).unwrap(), 2);
+        s.unarchive_session("a").unwrap();
+        assert_eq!(s.count_sessions(false).unwrap(), 2);
+        s.rename_session("a", "new title").unwrap();
+        assert_eq!(
+            s.get_session("a").unwrap().unwrap().title.as_deref(),
+            Some("new title")
+        );
+        assert!(
+            !s.ensure_session("a", "m", None).unwrap(),
+            "existing touches"
+        );
+        assert!(s.ensure_session("c", "m", None).unwrap(), "missing creates");
+        s.delete_session("c").unwrap();
+        assert!(s.get_session("c").unwrap().is_none());
+    }
+
+    #[test]
+    fn snapshots_list_and_export_jsonl() {
+        let s = mem_store();
+        s.create_session_full("sess", "m", Some("t"), None, None, None, None, None)
+            .unwrap();
+        s.append_message("sess", "user", "hello").unwrap();
+        s.insert_snapshot("sess", 1, "f.txt", "s1", b"one").unwrap();
+        s.insert_snapshot("sess", 2, "f.txt", "s2", b"two").unwrap();
+        let snaps = s.get_snapshots("sess").unwrap();
+        assert_eq!(snaps.len(), 2);
+        assert_eq!(snaps[0].0, 2, "newest first");
+        let jl = s.export_jsonl("sess").unwrap();
+        let lines: Vec<&str> = jl.lines().collect();
+        assert_eq!(lines.len(), 2);
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["type"], serde_json::json!("session"));
+        assert_eq!(first["id"], serde_json::json!("sess"));
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["type"], serde_json::json!("message"));
+        assert!(s.export_jsonl("missing").is_err());
+    }
+
+    #[test]
+    fn export_jsonl_includes_todos() {
+        // P1 #13: todos are auditable outside the session via export.
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        s.set_todos(
+            "sess",
+            &[
+                ("a".into(), "completed".into(), None),
+                ("b".into(), "in_progress".into(), Some("high".into())),
+            ],
+        )
+        .unwrap();
+        let jl = s.export_jsonl("sess").unwrap();
+        let todos: Vec<serde_json::Value> = jl
+            .lines()
+            .filter_map(|l| serde_json::from_str(l).ok())
+            .filter(|v: &serde_json::Value| v["type"] == "todo")
+            .collect();
+        assert_eq!(todos.len(), 2);
+        assert_eq!(todos[0]["content"], serde_json::json!("a"));
+        assert_eq!(todos[1]["priority"], serde_json::json!("high"));
+    }
+
+    #[test]
+    fn insert_snapshot_caps_per_session() {
+        // P1 #11: snapshot history is bounded (DB rows; files best-effort).
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        for i in 0..(MAX_SNAPSHOTS_PER_SESSION + 10) {
+            s.insert_snapshot("sess", i, "f.txt", "s", b"x").unwrap();
+        }
+        let snaps = s.get_snapshots("sess").unwrap();
+        assert_eq!(snaps.len() as i64, MAX_SNAPSHOTS_PER_SESSION);
+        assert_eq!(snaps[0].0, MAX_SNAPSHOTS_PER_SESSION + 9, "newest kept");
+        // Other sessions are unaffected.
+        s.create_session("other", "m", None).unwrap();
+        s.insert_snapshot("other", 1, "g.txt", "s", b"y").unwrap();
+        assert_eq!(s.get_snapshots("other").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn delete_messages_after_truncates_conversation() {
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        s.append_message("sess", "user", "one").unwrap();
+        let seq = s.append_message("sess", "assistant", "two").unwrap();
+        s.record_tool_call("c1", "sess", seq, "read", &serde_json::json!({}))
+            .unwrap();
+        s.append_message("sess", "user", "three").unwrap();
+        let (msgs, calls) = s.delete_messages_after("sess", 1).unwrap();
+        assert_eq!((msgs, calls), (2, 1));
+        let rest = s.get_messages("sess").unwrap();
+        assert_eq!(rest.len(), 1);
+        assert_eq!(rest[0].2, "one");
+        assert!(s.get_tool_calls_grouped_simple("sess").unwrap().is_empty());
+        let (msgs, calls) = s.delete_messages_after("sess", 99).unwrap();
+        assert_eq!((msgs, calls), (0, 0));
+    }
+
+    #[test]
+    fn snapshot_contents_order_and_prune() {
+        let s = mem_store();
+        s.create_session("sess", "m", None).unwrap();
+        s.insert_snapshot("sess", 2, "b.txt", "s", b"two").unwrap();
+        s.insert_snapshot("sess", 1, "a.txt", "s", b"one").unwrap();
+        let all = s.get_snapshot_contents("sess").unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].0, 1, "ascending by message_seq");
+        assert_eq!(s.delete_snapshots_after("sess", 1).unwrap(), 1);
+        assert_eq!(s.get_snapshots("sess").unwrap().len(), 1);
     }
 }

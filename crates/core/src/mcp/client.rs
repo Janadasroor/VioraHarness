@@ -75,3 +75,28 @@ impl McpBridge {
         vec![]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_job_is_none() {
+        let b = McpBridge::new();
+        assert!(b.job_status("sim_9999").is_none());
+    }
+
+    #[test]
+    fn describe_tools_shape() {
+        let _ = McpBridge::describe_tools();
+    }
+
+    #[test]
+    fn job_handle_debug() {
+        let h = JobHandle {
+            id: "sim_1".into(),
+            status: "queued".into(),
+        };
+        assert!(format!("{h:?}").contains("sim_1"));
+    }
+}

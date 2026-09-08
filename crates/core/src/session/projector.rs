@@ -9,3 +9,15 @@ impl<'a> Projector<'a> {
         Self { store }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constructs_over_mem_store() {
+        let store = SessionStore::new_in_memory().unwrap();
+        let p = Projector::new(&store);
+        assert!(p.store.count_sessions(false).unwrap() >= 0);
+    }
+}

@@ -767,7 +767,7 @@ impl AgentLoop {
                         &id[..8.min(id.len())]
                     );
                     let _ = std::fs::write(&tmp_path, &result_str);
-                    result_str.truncate(8000);
+                    result_str = crate::tools::viora::truncate_to_bytes(&result_str, 8000);
                     result_str.push_str(&format!(
                         "...(truncated, full {} chars saved to {} — press V in TUI / cat {} or /output)",
                         result_for_llm.to_string().len(),
@@ -2053,6 +2053,57 @@ mod tests {
     }
 
     #[test]
+    fn strip_wrappers_peels_stacked_wrappers() {
+        assert_eq!(strip_wrappers("sudo rm -rf /tmp/x"), "rm -rf /tmp/x");
+        assert_eq!(strip_wrappers("sudo nohup timeout 5 rm f"), "rm f");
+        assert_eq!(strip_wrappers("FOO=1 BAR=2 ls -la"), "ls -la");
+        assert_eq!(strip_wrappers("env FOO=1 ls"), "ls");
+        assert_eq!(strip_wrappers("timeout -- rm f"), "rm f");
+        assert_eq!(strip_wrappers("nice -n 5 rm f"), "rm f");
+        assert_eq!(strip_wrappers("ls -la"), "ls -la");
+        assert_eq!(
+            strip_wrappers("sudoer ls"),
+            "sudoer ls",
+            "prefix is not a wrapper"
+        );
+        assert_eq!(strip_wrappers("timeoutx ls"), "timeoutx ls");
+        assert_eq!(strip_wrappers(""), "");
+    }
+
+    #[test]
+    fn shell_segments_quote_and_escape() {
+        assert_eq!(
+            split_shell_segments("echo 'a;b' && ls"),
+            vec!["echo 'a;b'", "ls"]
+        );
+        assert_eq!(
+            split_shell_segments("echo \"a|b\" | cat"),
+            vec!["echo \"a|b\"", "cat"]
+        );
+        assert_eq!(split_shell_segments("echo a\\;b"), vec!["echo a\\;b"]);
+        assert_eq!(split_shell_segments(""), Vec::<&str>::new());
+        assert_eq!(split_shell_segments("ls"), vec!["ls"]);
+    }
+
+    #[test]
+    fn dangerous_bash_exec_and_mkfs_variants() {
+        for cmd in [
+            "exec rm -f f",
+            "exec dd if=x of=y",
+            "mkfs.ext4 /dev/sda1",
+            "mkfs-vfat /dev/sdb1",
+            "xargs -0 shred",
+            "!rm f",
+        ] {
+            assert!(is_dangerous_bash(&bash_args(cmd)), "danger: {cmd}");
+        }
+        assert!(
+            !is_dangerous_bash(&bash_args("exec >/tmp/vh_cli_test/out")),
+            "bare redirect exec is safe"
+        );
+    }
+
+    #[test]
     fn tool_args_normalization() {
         assert_eq!(normalize_tool_args("{\"a\":1}"), "{\"a\":1}");
         assert_eq!(normalize_tool_args("{}"), "{}");
@@ -2064,6 +2115,7 @@ mod tests {
 
     #[test]
     fn auto_allow_flag_parsing() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for v in ["1", "true", "yes", "on", "TRUE", "Yes"] {
             std::env::set_var("VIORAHARNESS_AUTO_ALLOW", v);
             assert!(auto_allow_on(), "{v}");
@@ -2079,6 +2131,7 @@ mod tests {
     #[test]
     fn approval_guard_holds_and_restores() {
         use crate::tools::viora::approved_call;
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("VIORAHARNESS_APPROVED_CALL");
         assert!(!approved_call());
         {

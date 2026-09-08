@@ -584,4 +584,106 @@ mod tests {
         );
         assert_ne!(border.fg, Theme::panel_bg().bg);
     }
+
+    fn palette_fields(p: &Palette) -> [&str; 15] {
+        [
+            &p.primary,
+            &p.secondary,
+            &p.accent,
+            &p.error,
+            &p.warning,
+            &p.success,
+            &p.info,
+            &p.text,
+            &p.textMuted,
+            &p.background,
+            &p.backgroundPanel,
+            &p.backgroundElement,
+            &p.border,
+            &p.borderSubtle,
+            &p.borderActive,
+        ]
+    }
+
+    fn is_hex6(s: &str) -> bool {
+        s.len() == 7 && s.starts_with('#') && s[1..].chars().all(|c| c.is_ascii_hexdigit())
+    }
+
+    #[test]
+    fn from_name_aliases_and_fallback() {
+        assert_eq!(Palette::from_name("catppuccin-mocha").primary, "#89b4fa");
+        assert_eq!(Palette::from_name("eye").background, "#1e1c1a");
+        assert_eq!(Palette::from_name("eye_comfort").background, "#1e1c1a");
+        assert_eq!(Palette::from_name("warm").background, "#1c1917");
+        assert_eq!(Palette::from_name("soft").background, "#1e2030");
+        assert_eq!(Palette::from_name("DRACULA").background, "#282a36");
+        assert_eq!(
+            Palette::from_name("nope").primary,
+            Palette::tokyonight().primary
+        );
+    }
+
+    #[test]
+    fn all_palettes_valid_and_readable() {
+        for p in [
+            Palette::tokyonight(),
+            Palette::catppuccin(),
+            Palette::dracula(),
+            Palette::gruvbox(),
+            Palette::nord(),
+            Palette::eye_comfort(),
+            Palette::warm_dark(),
+            Palette::tokyonight_soft(),
+        ] {
+            for f in palette_fields(&p) {
+                assert!(is_hex6(f), "bad hex: {f}");
+            }
+            assert_ne!(p.text, p.background, "text on background");
+            assert_ne!(p.textMuted, p.backgroundPanel, "muted on panel");
+            assert_ne!(p.background, p.backgroundPanel, "panel differs from bg");
+        }
+    }
+
+    #[test]
+    fn hex_to_color_shapes() {
+        assert_eq!(hex_to_color("#ff0000"), Color::Rgb(255, 0, 0));
+        assert_eq!(hex_to_color("00ff00"), Color::Rgb(0, 255, 0));
+        assert_eq!(hex_to_color("#zzzzzz"), Color::White);
+        assert_eq!(hex_to_color("#12345"), Color::White);
+        assert_eq!(hex_to_color(""), Color::White);
+    }
+
+    #[test]
+    fn theme_config_defaults_and_aliases() {
+        let cfg = ThemeConfig::default();
+        assert_eq!(cfg.theme, "eye-comfort");
+        assert!(cfg.show_thinking);
+        let pal: Palette = serde_json::from_value(serde_json::json!({
+            "primary": "#000001", "secondary": "#000002", "accent": "#000003",
+            "error": "#000004", "warning": "#000005", "success": "#000006",
+            "info": "#000007", "text": "#000008", "text_muted": "#111111",
+            "background": "#000009", "background_panel": "#00000a",
+            "background_element": "#00000b", "border": "#00000c",
+            "border_subtle": "#00000d", "border_active": "#00000e",
+        }))
+        .unwrap();
+        assert_eq!(pal.textMuted, "#111111");
+        assert_eq!(pal.backgroundPanel, "#00000a");
+        let cfg2: ThemeConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(cfg2.theme, "eye-comfort");
+    }
+
+    #[test]
+    fn thinking_title_style_is_demoted_from_labels() {
+        use ratatui::style::Modifier;
+        let s = Theme::thinking_title_style();
+        assert!(
+            s.add_modifier.contains(Modifier::ITALIC),
+            "thinking header should be italic like modern agents"
+        );
+        assert!(
+            !s.add_modifier.contains(Modifier::BOLD),
+            "thinking header must not use the bold of real labels"
+        );
+    }
 }

@@ -701,4 +701,42 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[tokio::test]
+    async fn dispatch_offline_arms() {
+        let r = execute_tool("no_such_tool", json!({})).await;
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("unknown tool"), "{r}");
+
+        let r = execute_tool("bash", json!({})).await;
+        assert_eq!(r["ok"], false, "schema requires command");
+
+        let r = execute_tool("bash", json!({"command": ""})).await;
+        assert_eq!(r["ok"], false);
+        assert!(
+            r["error"].as_str().unwrap().contains("missing command"),
+            "{r}"
+        );
+
+        let r = execute_tool("bash", json!({"command": "rm -rf /"})).await;
+        assert_eq!(r["ok"], false);
+        assert!(
+            r["error"].as_str().unwrap().contains("denied by policy"),
+            "{r}"
+        );
+
+        let r = execute_tool("viora", json!({"cmd": ""})).await;
+        assert_eq!(r["ok"], false);
+        assert!(r["error"].as_str().unwrap().contains("missing cmd"), "{r}");
+
+        let r = execute_tool("read", json!({})).await;
+        assert_eq!(r["ok"], false);
+        assert!(
+            r["error"]
+                .as_str()
+                .unwrap()
+                .contains("missing required field 'path'"),
+            "{r}"
+        );
+    }
 }
