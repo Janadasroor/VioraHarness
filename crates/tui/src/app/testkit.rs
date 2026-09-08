@@ -104,12 +104,30 @@ pub(crate) static DB_ENV_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
 pub(crate) static ERR_REG_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
 
-pub(crate) fn with_temp_db(tag: &str) -> (std::path::PathBuf, Option<String>) {
-    let db = std::env::temp_dir().join(format!("vh_tuidb_{tag}_{}", std::process::id()));
+/// Temp DB + env swap with the process-global env lock held. The returned
+/// guard MUST be kept alive for the whole test: dropping it releases the
+/// lock while `VIORAHARNESS_DB` still points at the temp file, which races
+/// other tests (lock-then-set ordering is enforced structurally here).
+pub(crate) fn with_temp_db(
+    tag: &str,
+) -> (
+    std::path::PathBuf,
+    Option<String>,
+    std::sync::MutexGuard<'static, ()>,
+) {
+    let guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Unique per call (counter defeats pid reuse) and sidecar-free: a stale
+    // -wal/-shm from a killed run would otherwise resurrect old state.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let db = std::env::temp_dir().join(format!("vh_tuidb_{tag}_{}_{n}", std::process::id()));
     let _ = std::fs::remove_file(&db);
+    for ext in ["wal", "shm", "journal"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db-{ext}")));
+    }
     let prev = std::env::var("VIORAHARNESS_DB").ok();
     std::env::set_var("VIORAHARNESS_DB", &db);
-    (db, prev)
+    (db, prev, guard)
 }
 
 pub(crate) fn restore_db_env(prev: Option<String>, db: &std::path::Path) {
@@ -118,6 +136,9 @@ pub(crate) fn restore_db_env(prev: Option<String>, db: &std::path::Path) {
         None => std::env::remove_var("VIORAHARNESS_DB"),
     }
     let _ = std::fs::remove_file(db);
+    for ext in ["wal", "shm", "journal"] {
+        let _ = std::fs::remove_file(db.with_extension(format!("db-{ext}")));
+    }
 }
 
 pub(crate) async fn wait_task_done(id: &str) {

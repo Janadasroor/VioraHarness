@@ -375,8 +375,7 @@ mod tests {
     #[tokio::test]
     async fn task_completion_wakes_idle_chat() {
         use vioraharness_core::tools::tasks;
-        let _env_guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = with_temp_db("wake");
+        let (db, prev, _env_guard) = with_temp_db("wake");
         let mut app = test_app();
         vioraharness_core::session::SessionStore::new(db.to_string_lossy().as_ref())
             .expect("temp store")
@@ -424,8 +423,7 @@ mod tests {
     #[tokio::test]
     async fn task_completion_stays_quiet_when_busy_or_off() {
         use vioraharness_core::tools::tasks;
-        let _env_guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = with_temp_db("quiet");
+        let (db, prev, _env_guard) = with_temp_db("quiet");
 
         let mut app = test_app();
         let t = tasks::spawn_task("echo quiet-probe-xyz", "/tmp");
@@ -574,8 +572,7 @@ mod tests {
 
     #[tokio::test]
     async fn queue_drains_on_idle_and_drops_on_mismatch() {
-        let (db, prev) = with_temp_db("queue");
-        let _env_guard = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (db, prev, _env_guard) = with_temp_db("queue");
         let mut app = test_app();
 
         app.queued_prompts.push(QueuedPrompt {
@@ -785,9 +782,15 @@ mod tests {
         }
     }
 
-    fn rewind_test_session(tag: &str) -> (std::path::PathBuf, Option<String>) {
+    fn rewind_test_session(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        Option<String>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
         use vioraharness_core::session::SessionStore;
-        let (db, prev) = with_temp_db(tag);
+        let (db, prev, guard) = with_temp_db(tag);
         let store = SessionStore::new(db.to_str().unwrap()).unwrap();
         store.create_session("sess-rewind", "m", None).unwrap();
         store
@@ -799,13 +802,12 @@ mod tests {
         store
             .append_message("sess-rewind", "user", "third message here")
             .unwrap();
-        (db, prev)
+        (db, prev, guard)
     }
 
     #[test]
     fn rewind_opens_dialog_at_latest_checkpoint() {
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = rewind_test_session("rewind-open");
+        let (db, prev, _env) = rewind_test_session("rewind-open");
         let mut app = test_app();
         app.session_id = "sess-rewind".into();
         app.handle_slash("/rewind");
@@ -846,8 +848,7 @@ mod tests {
     #[test]
     fn rewind_empty_session_shows_notice() {
         use vioraharness_core::session::SessionStore;
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = with_temp_db("rewind-empty");
+        let (db, prev, _env) = with_temp_db("rewind-empty");
         SessionStore::new(db.to_str().unwrap())
             .unwrap()
             .create_session("sess-empty", "m", None)
@@ -876,8 +877,7 @@ mod tests {
     #[test]
     fn rewind_arm_confirm_restores_and_truncates() {
         use vioraharness_core::session::SessionStore;
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = rewind_test_session("rewind-flow");
+        let (db, prev, _env) = rewind_test_session("rewind-flow");
         let dir = std::env::temp_dir().join("vh_rewind_tui_flow");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -922,8 +922,7 @@ mod tests {
 
     #[test]
     fn rewind_esc_cancels_without_changes() {
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = rewind_test_session("rewind-esc");
+        let (db, prev, _env) = rewind_test_session("rewind-esc");
         let mut app = test_app();
         app.session_id = "sess-rewind".into();
         app.handle_slash("/rewind");
@@ -945,8 +944,7 @@ mod tests {
     #[test]
     fn rewind_groups_one_user_turn_into_one_checkpoint() {
         use vioraharness_core::session::SessionStore;
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = with_temp_db("rewind-group");
+        let (db, prev, _env) = with_temp_db("rewind-group");
         {
             let store = SessionStore::new(db.to_str().unwrap()).unwrap();
             store.create_session("sess-group", "m", None).unwrap();
@@ -996,8 +994,7 @@ mod tests {
     #[test]
     fn rewind_skips_compaction_summaries_as_turns() {
         use vioraharness_core::session::SessionStore;
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = with_temp_db("rewind-compact");
+        let (db, prev, _env) = with_temp_db("rewind-compact");
         {
             let store = SessionStore::new(db.to_str().unwrap()).unwrap();
             store.create_session("sess-compact", "m", None).unwrap();
@@ -1030,8 +1027,7 @@ mod tests {
     #[test]
     fn rewind_badges_continue_and_wiring() {
         use vioraharness_core::session::SessionStore;
-        let _env = DB_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let (db, prev) = rewind_test_session("rewind-badges");
+        let (db, prev, _env) = rewind_test_session("rewind-badges");
         let dir = std::env::temp_dir().join("vh_rewind_tui_badges");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
