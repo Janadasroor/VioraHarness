@@ -1069,6 +1069,26 @@ impl SessionStore {
         Ok(n)
     }
 
+    pub fn snapshot_session_ids(&self) -> Result<Vec<String>> {
+        let conn = self.pool.get()?;
+        let mut stmt = conn.prepare("SELECT DISTINCT session_id FROM snapshots")?;
+        let rows = stmt.query_map([], |r| r.get(0))?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
+        }
+        Ok(out)
+    }
+
+    pub fn delete_all_snapshots(&self, session_id: &str) -> Result<usize> {
+        let conn = self.pool.get()?;
+        let n = conn.execute(
+            "DELETE FROM snapshots WHERE session_id = ?1",
+            params![session_id],
+        )?;
+        Ok(n)
+    }
+
     pub fn export_jsonl(&self, session_id: &str) -> Result<String> {
         let sess = self
             .get_session(session_id)?

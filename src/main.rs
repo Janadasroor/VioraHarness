@@ -89,6 +89,19 @@ enum Commands {
     },
 
     #[command(
+        visible_alias = "clean",
+        alias = "prune",
+        about = "Garbage-collect stale snapshot state (DB rows + .vioraharness/snapshots dirs)"
+    )]
+    Gc {
+        #[arg(long, default_value = "7")]
+        days: u64,
+
+        #[arg(long)]
+        dry_run: bool,
+    },
+
+    #[command(
         visible_alias = "open",
         visible_alias = "r",
         alias = "continue",
@@ -931,6 +944,46 @@ async fn main() -> anyhow::Result<()> {
                 Err(e) => println!("    db error: {e}"),
             }
         }
+        Commands::Gc { days, dry_run } => {
+            let db = std::env::var("VIORAHARNESS_DB")
+                .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+            let store = vioraharness_core::session::SessionStore::new(&db)?;
+            let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+            let snapshots_root = cwd.join(".vioraharness/snapshots");
+            let max_idle = std::time::Duration::from_secs(days.saturating_mul(24 * 3600));
+            let rep = vioraharness_core::session::gc::gc_snapshots(
+                &store,
+                &snapshots_root,
+                max_idle,
+                dry_run,
+            )?;
+            if dry_run {
+                println!(
+                    "gc --dry-run (idle > {days}d, root {})",
+                    snapshots_root.display()
+                );
+            } else {
+                println!("gc (idle > {days}d, root {})", snapshots_root.display());
+            }
+            println!(
+                "  sessions pruned: {}{}",
+                rep.snapshot_sessions_pruned.len(),
+                if rep.snapshot_sessions_pruned.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", rep.snapshot_sessions_pruned.join(", "))
+                }
+            );
+            println!("  snapshot rows: {}", rep.snapshot_rows_deleted);
+            println!(
+                "  snapshot dirs: {} ({:.1} KiB freed)",
+                rep.snapshot_dirs_removed,
+                rep.bytes_freed as f64 / 1024.0
+            );
+            if dry_run {
+                println!("  (nothing removed — rerun without --dry-run to apply)");
+            }
+        }
         Commands::Sessions { all, search, limit } => {
             let db = std::env::var("VIORAHARNESS_DB")
                 .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
@@ -1274,6 +1327,27 @@ mod tests {
             other => panic!("unexpected: {other:?}"),
         }
         assert!(Cli::try_parse_from(["vh", "nope"]).is_err());
+    }
+
+    #[test]
+    fn cli_parses_gc_with_defaults_and_alias() {
+        match Cli::try_parse_from(["vh", "gc"]).unwrap().command {
+            Some(Commands::Gc { days, dry_run }) => {
+                assert_eq!(days, 7);
+                assert!(!dry_run);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match Cli::try_parse_from(["vh", "clean", "--days", "30", "--dry-run"])
+            .unwrap()
+            .command
+        {
+            Some(Commands::Gc { days, dry_run }) => {
+                assert_eq!(days, 30);
+                assert!(dry_run);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[test]
