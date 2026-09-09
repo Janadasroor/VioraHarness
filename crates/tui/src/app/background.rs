@@ -1112,8 +1112,12 @@ mod tests {
             "tab-completes /rewind"
         );
         app.popup = Popup::Help;
-        let help = render_text(&mut app, 120, 80);
+        let help = render_text(&mut app, 120, 100);
         assert!(help.contains("/rewind"), "help documents /rewind");
+        assert!(
+            help.contains("Shift+"),
+            "help documents input selection keys"
+        );
         let _ = std::fs::remove_dir_all(&dir);
         restore_db_env(prev, &db);
     }

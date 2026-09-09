@@ -757,7 +757,9 @@ mod tests {
             let store = SessionStore::new(db.to_str().unwrap()).unwrap();
             store.create_session("sess-seq", "m", None).unwrap();
             store.append_message("sess-seq", "user", "fix it").unwrap();
-            store.append_message("sess-seq", "assistant", "on it").unwrap();
+            store
+                .append_message("sess-seq", "assistant", "on it")
+                .unwrap();
         }
         let r = execute_tool(
             "edit",

@@ -1,8 +1,17 @@
 use super::*;
-use crossterm::event::{KeyCode, MouseButton, MouseEvent, MouseEventKind};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 impl App {
+    /// Test + compat entry: plain key without modifiers.
+    #[cfg(test)]
     pub(crate) async fn handle_key(&mut self, code: KeyCode) -> anyhow::Result<()> {
+        self.handle_key_event(KeyEvent::new(code, KeyModifiers::empty()))
+            .await
+    }
+
+    pub(crate) async fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<()> {
+        let code = key.code;
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         if self.busy
             && !matches!(
                 code,
@@ -74,10 +83,10 @@ impl App {
                 self.input.delete();
                 self.input.completion_idx = 0;
             }
-            KeyCode::Left => self.input.move_left(),
-            KeyCode::Right => self.input.move_right(),
-            KeyCode::Home => self.input.cursor = 0,
-            KeyCode::End => self.input.cursor = self.input.text.len(),
+            KeyCode::Left => self.input.move_left(shift),
+            KeyCode::Right => self.input.move_right(shift),
+            KeyCode::Home => self.input.move_to_start(shift),
+            KeyCode::End => self.input.move_to_end(shift),
             KeyCode::Up => {
                 if self.busy {
                     self.scroll = self.scroll.saturating_add(1);
@@ -120,6 +129,11 @@ impl App {
             }
             KeyCode::Esc => {
                 self.dragging = false;
+                self.input_drag = false;
+                if self.input.selected_range().is_some() {
+                    self.input.clear_selection();
+                    return Ok(());
+                }
                 if self.selection.take().is_some() {
                     return Ok(());
                 }
@@ -313,10 +327,52 @@ impl App {
         hit_rect(self.input_area, mx, my)
     }
 
+    /// Map a mouse column to an input-text byte index (width-aware, clamped).
+    pub(crate) fn input_col_to_idx(&self, mx: u16) -> usize {
+        use unicode_width::UnicodeWidthChar;
+        let x0 = self.input_area.x.saturating_add(1);
+        let max_w = self.input_area.width.saturating_sub(2) as usize;
+        let col = (mx.saturating_sub(x0) as usize).min(max_w);
+        let mut w = 0;
+        for (i, c) in self.input.text.char_indices() {
+            let cw = c.width().unwrap_or(0);
+            if w + cw > col {
+                return i;
+            }
+            w += cw;
+        }
+        self.input.text.len()
+    }
+
+    pub(crate) fn copy_input_selection(&mut self) {
+        if let Some(text) = self.input.selected_text() {
+            match clipboard_copy_text(&text) {
+                Ok((n, via)) => {
+                    self.status =
+                        format!("copied {n} chars via {via} — selection kept (Esc clears)");
+                }
+                Err(e) => {
+                    self.status = format!("copy failed ({e}) — selection kept");
+                }
+            }
+        } else {
+            self.status = "nothing selected — Shift+←/→ or drag to select first".into();
+        }
+    }
+
     pub(crate) fn handle_mouse(&mut self, m: MouseEvent) {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 if self.popup != Popup::None {
+                    return;
+                }
+                if self.in_input(m.column, m.row) {
+                    let idx = self.input_col_to_idx(m.column);
+                    self.input.cursor = idx;
+                    self.input.sel_anchor = Some(idx);
+                    self.input_drag = true;
+                    self.dragging = false;
+                    self.selection = None;
                     return;
                 }
                 match self.screen_to_content(m.column, m.row) {
@@ -336,7 +392,18 @@ impl App {
                 }
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                if !self.dragging || self.popup != Popup::None {
+                if self.popup != Popup::None {
+                    return;
+                }
+                if self.input_drag {
+                    let idx = self.input_col_to_idx(m.column);
+                    self.input.cursor = idx;
+                    if self.input.sel_anchor == Some(idx) {
+                        self.input.sel_anchor = None;
+                    }
+                    return;
+                }
+                if !self.dragging {
                     return;
                 }
 
@@ -354,6 +421,15 @@ impl App {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
+                if self.input_drag {
+                    self.input_drag = false;
+                    if self.input.selected_range().is_some() {
+                        self.copy_input_selection();
+                    } else {
+                        self.input.clear_selection();
+                    }
+                    return;
+                }
                 if !self.dragging {
                     return;
                 }
@@ -522,5 +598,108 @@ mod tests {
             text.contains("Ctrl+O"),
             "hint advertises the working key, not plain o"
         );
+    }
+
+    fn shift(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    async fn type_text(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.handle_key(KeyCode::Char(c)).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn shift_arrows_select_input_text() {
+        let mut app = test_app();
+        type_text(&mut app, "hello").await;
+        app.handle_key_event(shift(KeyCode::Left)).await.unwrap();
+        app.handle_key_event(shift(KeyCode::Left)).await.unwrap();
+        assert_eq!(app.input.selected_text().as_deref(), Some("lo"));
+        app.handle_key_event(shift(KeyCode::Home)).await.unwrap();
+        assert_eq!(app.input.selected_text().as_deref(), Some("hello"));
+        app.handle_key_event(KeyEvent::new(KeyCode::End, KeyModifiers::empty()))
+            .await
+            .unwrap();
+        assert_eq!(app.input.selected_range(), None, "plain End collapses");
+    }
+
+    #[tokio::test]
+    async fn typing_replaces_keyboard_selection() {
+        let mut app = test_app();
+        type_text(&mut app, "hello").await;
+        app.handle_key_event(shift(KeyCode::Home)).await.unwrap();
+        app.handle_key(KeyCode::Char('X')).await.unwrap();
+        assert_eq!(app.input.text, "X");
+        assert_eq!(app.input.selected_range(), None);
+    }
+
+    #[tokio::test]
+    async fn esc_clears_input_selection_first() {
+        let mut app = test_app();
+        type_text(&mut app, "hello").await;
+        app.handle_key_event(shift(KeyCode::Left)).await.unwrap();
+        assert!(app.input.selected_range().is_some());
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert_eq!(app.input.selected_range(), None);
+        assert_eq!(app.input.text, "hello", "text kept, only selection cleared");
+    }
+
+    #[test]
+    fn mouse_drag_selects_inside_input() {
+        let mut app = mouse_app();
+        app.input_area = Rect::new(0, 26, 100, 3);
+        app.input.text = "hello world".into();
+        app.input.cursor = 11;
+        // Down at column for byte index 6 ('w'), drag back to 0.
+        app.handle_mouse(mouse_event(MouseEventKind::Down(MouseButton::Left), 7, 27));
+        assert_eq!(app.input.cursor, 6);
+        assert!(app.input_drag);
+        app.handle_mouse(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 27));
+        assert_eq!(
+            app.input.selected_text().as_deref(),
+            Some("hello "),
+            "drag extends the selection"
+        );
+        app.handle_mouse(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 27));
+        assert!(!app.input_drag);
+        assert!(
+            app.status.contains("copi") || app.status.contains("copy failed"),
+            "release copies (or reports backend failure): {}",
+            app.status
+        );
+    }
+
+    #[test]
+    fn copy_input_selection_reports_result() {
+        let mut app = test_app();
+        app.input.text = "copy me".into();
+        app.input.cursor = 7;
+        app.input.sel_anchor = Some(0);
+        app.copy_input_selection();
+        assert!(
+            app.status.contains("copied") || app.status.contains("copy failed"),
+            "status reports the outcome: {}",
+            app.status
+        );
+        let mut empty = test_app();
+        empty.copy_input_selection();
+        assert!(
+            empty.status.contains("nothing selected"),
+            "empty selection guided: {}",
+            empty.status
+        );
+    }
+
+    #[test]
+    fn input_col_mapping_clamps_and_counts_wide_chars() {
+        let mut app = test_app();
+        app.input_area = Rect::new(0, 0, 100, 3);
+        app.input.text = "aｱb".into();
+        assert_eq!(app.input_col_to_idx(1), 0);
+        assert_eq!(app.input_col_to_idx(2), 1, "after 'a'");
+        assert_eq!(app.input_col_to_idx(3), 4, "wide char occupies two columns");
+        assert_eq!(app.input_col_to_idx(200), 5, "clamped to end");
     }
 }

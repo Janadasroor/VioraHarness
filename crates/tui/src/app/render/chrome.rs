@@ -203,7 +203,20 @@ impl App {
         } else {
             Style::default()
         };
-        let input = Paragraph::new(display_text)
+        let input_line = if self.input.text.is_empty() {
+            Line::from(Span::styled(display_text, style))
+        } else if let Some((lo, hi)) = self.input.selected_range() {
+            let before = &self.input.text[..lo];
+            let mid = &self.input.text[lo..hi];
+            let after = &self.input.text[hi..];
+            let mut spans = vec![Span::styled(before.to_string(), style)];
+            spans.push(Span::styled(mid.to_string(), Theme::selection()));
+            spans.push(Span::styled(after.to_string(), style));
+            Line::from(spans)
+        } else {
+            Line::from(Span::styled(display_text, style))
+        };
+        let input = Paragraph::new(input_line)
             .block(
                 Block::default()
                     .borders(Borders::ALL)

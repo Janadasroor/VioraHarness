@@ -582,4 +582,32 @@ mod tests {
             .expect("cancel label");
         assert_eq!(label.style.fg, Some(Color::DarkGray));
     }
+
+    #[test]
+    fn input_selection_paints_highlight() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = test_app();
+        app.input.text = "hello".into();
+        app.input.cursor = 5;
+        app.input.sel_anchor = Some(2);
+        let backend = TestBackend::new(40, 24);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let sel_bg = Theme::selection().bg;
+        let mut painted = String::new();
+        for y in 0..buf.area.height {
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                if Some(cell.bg) == sel_bg {
+                    painted.push_str(cell.symbol());
+                }
+            }
+        }
+        assert!(
+            painted.contains("llo"),
+            "selected input text highlighted: {painted:?}"
+        );
+        assert!(!painted.contains('h'), "unselected head not painted");
+    }
 }

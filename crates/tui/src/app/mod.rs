@@ -130,6 +130,7 @@ pub struct App {
 
     pub(crate) selection: Option<Selection>,
     pub(crate) dragging: bool,
+    pub(crate) input_drag: bool,
     pub(crate) copy_pending: bool,
 
     pub(crate) chat_area: Rect,
@@ -1336,6 +1337,7 @@ impl App {
             chat_total_lines: 0,
             selection: None,
             dragging: false,
+            input_drag: false,
             copy_pending: false,
             chat_area: Rect::default(),
             input_area: Rect::default(),
@@ -1747,7 +1749,9 @@ impl App {
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                             && k.modifiers.contains(KeyModifiers::ALT)
                         {
-                            if self.selection.is_some() {
+                            if self.input.selected_range().is_some() {
+                                self.copy_input_selection();
+                            } else if self.selection.is_some() {
                                 self.copy_pending = true;
                             } else {
                                 self.status = "nothing selected — drag to select first".into();
@@ -1758,7 +1762,9 @@ impl App {
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                             && !k.modifiers.contains(KeyModifiers::ALT)
                         {
-                            if self.selection.is_some() {
+                            if self.input.selected_range().is_some() {
+                                self.copy_input_selection();
+                            } else if self.selection.is_some() {
                                 self.copy_pending = true;
                             } else {
                                 self.selection = None;
@@ -1975,11 +1981,11 @@ impl App {
                                         continue;
                                     }
                                     KeyCode::Char('a') | KeyCode::Char('A') => {
-                                        self.input.move_to_start();
+                                        self.input.move_to_start(false);
                                         continue;
                                     }
                                     KeyCode::Char('e') | KeyCode::Char('E') => {
-                                        self.input.move_to_end();
+                                        self.input.move_to_end(false);
                                         continue;
                                     }
                                     KeyCode::Char('w') | KeyCode::Char('W') => {
@@ -2046,11 +2052,11 @@ impl App {
                                         continue;
                                     }
                                     KeyCode::Char('b') | KeyCode::Char('B') => {
-                                        self.input.move_left();
+                                        self.input.move_left(false);
                                         continue;
                                     }
                                     KeyCode::Char('f') | KeyCode::Char('F') => {
-                                        self.input.move_right();
+                                        self.input.move_right(false);
                                         continue;
                                     }
                                     _ => {}
@@ -2062,7 +2068,7 @@ impl App {
                             self.handle_popup_key(k);
                             continue;
                         }
-                        self.handle_key(k.code).await?;
+                        self.handle_key_event(k).await?;
                     }
                     Event::Resize(_, _) => {
                         continue;

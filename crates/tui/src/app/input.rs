@@ -6,14 +6,69 @@ pub struct InputState {
     pub(crate) hist_idx: Option<usize>,
     pub(crate) draft: String,
     pub(crate) completion_idx: usize,
+    /// Keyboard/mouse text selection anchor (byte index). The selection
+    /// spans anchor..cursor; None means no selection.
+    pub(crate) sel_anchor: Option<usize>,
 }
 
 impl InputState {
+    /// Ordered, non-empty selected byte range, if any.
+    pub(crate) fn selected_range(&self) -> Option<(usize, usize)> {
+        let a = self.sel_anchor?;
+        let (lo, hi) = (a.min(self.cursor), a.max(self.cursor));
+        if lo == hi {
+            return None;
+        }
+        Some((lo.min(self.text.len()), hi.min(self.text.len())))
+    }
+
+    pub(crate) fn selected_text(&self) -> Option<String> {
+        self.selected_range()
+            .map(|(lo, hi)| self.text[lo..hi].to_string())
+    }
+
+    pub(crate) fn clear_selection(&mut self) {
+        self.sel_anchor = None;
+    }
+
+    /// Delete the selected range, placing the cursor at its start.
+    /// Returns true when something was deleted.
+    pub(crate) fn delete_selection(&mut self) -> bool {
+        if let Some((lo, hi)) = self.selected_range() {
+            self.text.drain(lo..hi);
+            self.cursor = lo;
+            self.sel_anchor = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn move_to(&mut self, pos: usize, extend: bool) {
+        let pos = pos.min(self.text.len());
+        if extend {
+            if self.sel_anchor.is_none() {
+                self.sel_anchor = Some(self.cursor);
+            }
+            self.cursor = pos;
+            if self.sel_anchor == Some(self.cursor) {
+                self.sel_anchor = None;
+            }
+        } else {
+            self.cursor = pos;
+            self.sel_anchor = None;
+        }
+    }
+
     pub(crate) fn insert(&mut self, c: char) {
+        self.delete_selection();
         self.text.insert(self.cursor, c);
         self.cursor += c.len_utf8();
     }
     pub(crate) fn backspace(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor > 0 {
             let prev = self.text[..self.cursor]
                 .chars()
@@ -25,45 +80,55 @@ impl InputState {
         }
     }
     pub(crate) fn delete(&mut self) {
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor < self.text.len() {
             let len = self.text[self.cursor..].chars().next().unwrap().len_utf8();
             self.text.drain(self.cursor..self.cursor + len);
         }
     }
-    pub(crate) fn move_left(&mut self) {
+    pub(crate) fn move_left(&mut self, extend: bool) {
         if self.cursor > 0 {
             let p = self.text[..self.cursor]
                 .chars()
                 .next_back()
                 .unwrap()
                 .len_utf8();
-            self.cursor -= p;
+            self.move_to(self.cursor - p, extend);
+        } else if !extend {
+            self.sel_anchor = None;
         }
     }
-    pub(crate) fn move_right(&mut self) {
+    pub(crate) fn move_right(&mut self, extend: bool) {
         if self.cursor < self.text.len() {
             let l = self.text[self.cursor..].chars().next().unwrap().len_utf8();
-            self.cursor += l;
+            self.move_to(self.cursor + l, extend);
+        } else if !extend {
+            self.sel_anchor = None;
         }
     }
-    pub(crate) fn move_to_start(&mut self) {
-        self.cursor = 0;
+    pub(crate) fn move_to_start(&mut self, extend: bool) {
+        self.move_to(0, extend);
     }
-    pub(crate) fn move_to_end(&mut self) {
-        self.cursor = self.text.len();
+    pub(crate) fn move_to_end(&mut self, extend: bool) {
+        self.move_to(self.text.len(), extend);
     }
     pub(crate) fn delete_to_start(&mut self) {
+        self.sel_anchor = None;
         if self.cursor > 0 {
             self.text.drain(0..self.cursor);
             self.cursor = 0;
         }
     }
     pub(crate) fn delete_to_end(&mut self) {
+        self.sel_anchor = None;
         if self.cursor < self.text.len() {
             self.text.truncate(self.cursor);
         }
     }
     pub(crate) fn delete_word_before(&mut self) {
+        self.delete_selection();
         if self.cursor == 0 {
             return;
         }
@@ -88,6 +153,7 @@ impl InputState {
         self.cursor = end;
     }
     pub(crate) fn delete_word_after(&mut self) {
+        self.delete_selection();
         if self.cursor >= self.text.len() {
             return;
         }
@@ -111,6 +177,7 @@ impl InputState {
         self.text.drain(self.cursor..end);
     }
     pub(crate) fn insert_str(&mut self, s: &str) {
+        self.delete_selection();
         self.text.insert_str(self.cursor, s);
         self.cursor += s.len();
     }
@@ -125,6 +192,7 @@ impl InputState {
         self.hist_idx = None;
     }
     pub(crate) fn hist_prev(&mut self) {
+        self.sel_anchor = None;
         if self.history.is_empty() {
             return;
         }
@@ -142,6 +210,7 @@ impl InputState {
         }
     }
     pub(crate) fn hist_next(&mut self) {
+        self.sel_anchor = None;
         if let Some(idx) = self.hist_idx {
             if idx + 1 < self.history.len() {
                 let n = idx + 1;
@@ -232,6 +301,7 @@ impl InputState {
     }
 
     pub(crate) fn apply_completion(&mut self, completion: &str) {
+        self.sel_anchor = None;
         if let Some(space) = self.text.find(' ') {
             let rest = self.text[space..].to_string();
             self.text = format!("{completion}{rest}");
@@ -245,5 +315,80 @@ impl InputState {
         }
         self.cursor = self.text.len();
         self.completion_idx = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn typed(s: &str) -> InputState {
+        let mut input = InputState::default();
+        input.insert_str(s);
+        input.move_to_end(false);
+        input.clear_selection();
+        input
+    }
+
+    #[test]
+    fn shift_arrows_extend_and_collapse() {
+        let mut input = typed("hello");
+        assert_eq!(input.selected_range(), None);
+        input.move_left(true);
+        input.move_left(true);
+        assert_eq!(input.selected_range(), Some((3, 5)));
+        assert_eq!(input.selected_text().as_deref(), Some("lo"));
+        input.move_right(true);
+        assert_eq!(input.selected_range(), Some((4, 5)));
+        input.move_right(true);
+        assert_eq!(input.selected_range(), None, "back at anchor collapses");
+        input.move_left(false);
+        assert_eq!(input.selected_range(), None);
+        assert_eq!(input.cursor, 4);
+    }
+
+    #[test]
+    fn home_end_with_shift_select_to_edges() {
+        let mut input = typed("hello");
+        input.move_to_start(true);
+        assert_eq!(input.selected_text().as_deref(), Some("hello"));
+        input.move_to_end(false);
+        assert_eq!(input.selected_range(), None);
+        input.move_to_start(false);
+        input.move_right(true);
+        input.move_right(true);
+        assert_eq!(input.selected_text().as_deref(), Some("he"));
+    }
+
+    #[test]
+    fn typing_replaces_selection() {
+        let mut input = typed("hello");
+        input.move_to_start(true);
+        input.insert('X');
+        assert_eq!(input.text, "X");
+        assert_eq!(input.cursor, 1);
+        assert_eq!(input.selected_range(), None);
+    }
+
+    #[test]
+    fn backspace_deletes_selection() {
+        let mut input = typed("hello");
+        input.move_left(true);
+        input.move_left(true);
+        input.backspace();
+        assert_eq!(input.text, "hel");
+        assert_eq!(input.selected_range(), None);
+    }
+
+    #[test]
+    fn wide_chars_move_by_char_not_byte() {
+        let mut input = typed("aｱb");
+        input.move_to_start(true);
+        assert_eq!(input.selected_text().as_deref(), Some("aｱb"));
+        input.clear_selection();
+        input.move_right(true);
+        assert_eq!(input.cursor, 1);
+        input.move_right(true);
+        assert_eq!(input.cursor, 4, "skips the 3-byte char");
     }
 }
