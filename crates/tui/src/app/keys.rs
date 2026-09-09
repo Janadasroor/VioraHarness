@@ -228,11 +228,23 @@ impl App {
 
                 if prompt.starts_with('/') && Self::is_known_slash(&prompt) {
                     if self.busy && !Self::is_busy_safe_slash(&prompt) {
-                        let base = prompt.split_whitespace().next().unwrap_or(&prompt);
-                        self.messages.push(Msg::new(
-                            "system",
-                            format!("{base} waits for the current turn to finish (Esc cancels it)"),
-                        ));
+                        // Deferred: runs in order once the turn finishes,
+                        // exactly as if typed while idle.
+                        let base = prompt.split_whitespace().next().unwrap_or("").to_string();
+                        self.queued_prompts.push(QueuedPrompt {
+                            session_id: self.session_id.clone(),
+                            send: prompt,
+                            image: None,
+                            slash: true,
+                        });
+                        self.input.text.clear();
+                        self.input.cursor = 0;
+                        let n = self.queued_prompts.len();
+                        self.status = if n == 1 {
+                            format!("{base} queued — runs when the turn finishes")
+                        } else {
+                            format!("{base} queued ({n} waiting) — runs in order when idle")
+                        };
                         return Ok(());
                     }
                     self.handle_slash(&prompt);

@@ -3,6 +3,9 @@ pub(crate) struct QueuedPrompt {
     pub(crate) session_id: String,
     pub(crate) send: String,
     pub(crate) image: Option<(String, String)>,
+    /// Deferred slash command: run via the command handler when idle
+    /// instead of sending as a model prompt.
+    pub(crate) slash: bool,
 }
 
 #[derive(Debug, Clone)]

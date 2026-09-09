@@ -38,6 +38,7 @@ impl App {
                     session_id: self.session_id.clone(),
                     send: Self::task_wake_prompt(&done),
                     image: None,
+                    slash: false,
                 });
                 self.status = format!(
                     "task {} finished — follow-up queued ({})",
@@ -172,6 +173,7 @@ impl App {
             session_id: self.session_id.clone(),
             send,
             image: pending_img.map(|img| (img.mime.to_string(), img.b64)),
+            slash: false,
         });
         let n = self.queued_prompts.len();
         self.status = if n == 1 {
@@ -181,32 +183,49 @@ impl App {
         };
     }
 
+    /// Send queued prompts in order, but only once the agent is fully
+    /// idle — never injected into a running turn. Deferred slash commands
+    /// run through the command handler; the first model prompt starts a
+    /// turn and the rest wait for the next idle drain.
     pub(crate) fn drain_queue(&mut self) {
         if self.busy || self.pending.is_some() || self.model.trim().is_empty() {
             return;
         }
-        while let Some(head) = self.queued_prompts.first() {
-            if head.session_id != self.session_id {
-                self.queued_prompts.remove(0);
-                self.messages.push(Msg::new(
-                    "system",
-                    "dropped queued prompt (session changed)",
-                ));
+        loop {
+            while let Some(head) = self.queued_prompts.first() {
+                if head.session_id != self.session_id {
+                    self.queued_prompts.remove(0);
+                    self.messages.push(Msg::new(
+                        "system",
+                        "dropped queued prompt (session changed)",
+                    ));
+                    continue;
+                }
+                break;
+            }
+            let Some(head) = self.queued_prompts.first() else {
+                return;
+            };
+            if head.slash {
+                let q = self.queued_prompts.remove(0);
+                self.handle_slash(&q.send);
+                if self.should_quit || self.busy || self.pending.is_some() {
+                    // Quitting, or the command started a turn: the rest
+                    // waits for the next idle drain.
+                    return;
+                }
                 continue;
             }
-            break;
-        }
-        if self.queued_prompts.is_empty() {
+            let q = self.queued_prompts.remove(0);
+            if !self.queued_prompts.is_empty() {
+                self.status = format!(
+                    "sending queued prompt ({} more waiting)…",
+                    self.queued_prompts.len()
+                );
+            }
+            self.start_turn(q.send, q.image);
             return;
         }
-        let q = self.queued_prompts.remove(0);
-        if !self.queued_prompts.is_empty() {
-            self.status = format!(
-                "sending queued prompt ({} more waiting)…",
-                self.queued_prompts.len()
-            );
-        }
-        self.start_turn(q.send, q.image);
     }
 
     pub(crate) fn poll_compact(&mut self) {
@@ -555,19 +574,31 @@ mod tests {
         assert_eq!(app.popup, Popup::Tasks, "/tasks opens while busy");
         app.popup = Popup::None;
 
+        // Non-safe commands queue as deferred work instead of dropping.
         let sid = app.session_id.clone();
         app.input.text = "/new".into();
         app.input.cursor = 4;
         app.handle_key(KeyCode::Enter).await.unwrap();
-        assert_eq!(app.session_id, sid, "session untouched");
-        assert_eq!(app.input.text, "/new", "input kept");
+        assert_eq!(app.session_id, sid, "session untouched while busy");
+        assert_eq!(app.input.text, "", "input cleared on queue");
+        assert_eq!(app.queued_prompts.len(), 1);
+        assert!(app.queued_prompts[0].slash, "marked deferred");
+        assert_eq!(app.queued_prompts[0].send, "/new");
         assert!(
-            app.messages
-                .iter()
-                .any(|m| m.content.contains("waits for the current turn")),
-            "defer notice shown"
+            app.status.contains("queued"),
+            "queue notice: {}",
+            app.status
         );
-        assert!(app.queued_prompts.is_empty(), "commands never queue");
+
+        // Once the turn finishes, the deferred command runs as if typed idle.
+        app.busy = false;
+        app.drain_queue();
+        assert_ne!(app.session_id, sid, "deferred /new ran on drain");
+        assert!(!app.busy, "no model turn started");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("New chat")),
+            "command output shown"
+        );
     }
 
     #[tokio::test]
@@ -579,6 +610,7 @@ mod tests {
             session_id: app.session_id.clone(),
             send: "drained-next".into(),
             image: None,
+            slash: false,
         });
         app.drain_queue();
         assert!(app.busy, "turn started");
@@ -592,11 +624,13 @@ mod tests {
             session_id: "other-session".into(),
             send: "stale".into(),
             image: None,
+            slash: false,
         });
         app.queued_prompts.push(QueuedPrompt {
             session_id: app.session_id.clone(),
             send: "fresh".into(),
             image: None,
+            slash: false,
         });
         app.drain_queue();
         assert!(app.busy, "fresh slot fired after dropping stale");
@@ -613,6 +647,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn drain_runs_deferred_slash_in_order_after_prompt() {
+        let (db, prev, _env_guard) = with_temp_db("drain-order");
+        let mut app = test_app();
+        app.busy = true;
+
+        // Matrix typed while busy: prompt first, command second.
+        app.input.text = "first".into();
+        app.input.cursor = 5;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        app.input.text = "/clear".into();
+        app.input.cursor = 6;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert_eq!(app.queued_prompts.len(), 2, "both queued");
+        assert!(!app.queued_prompts[0].slash);
+        assert!(app.queued_prompts[1].slash, "command deferred second");
+
+        // Turn ends: the prompt fires first, the command waits.
+        app.busy = false;
+        app.drain_queue();
+        assert!(app.busy, "prompt turn started");
+        assert_eq!(app.queued_prompts.len(), 1, "slash still waiting");
+        assert!(app.queued_prompts[0].slash);
+        if let Some(h) = app.pending.take() {
+            h.abort();
+        }
+        app.busy = false;
+
+        // Prompt turn ends: the deferred command runs, nothing injected.
+        app.drain_queue();
+        assert!(!app.busy, "slash starts no model turn");
+        assert!(app.queued_prompts.is_empty(), "queue fully drained");
+        assert!(
+            app.messages.iter().any(|m| m.content == "cleared"),
+            "deferred /clear ran last"
+        );
+        restore_db_env(prev, &db);
+    }
+
+    #[tokio::test]
     async fn esc_cancel_drops_queue() {
         let mut app = test_app();
         app.busy = true;
@@ -620,6 +693,7 @@ mod tests {
             session_id: app.session_id.clone(),
             send: "doomed".into(),
             image: None,
+            slash: false,
         });
         app.handle_key(KeyCode::Esc).await.unwrap();
         assert!(!app.busy, "turn cancelled");
@@ -648,6 +722,7 @@ mod tests {
             session_id: app.session_id.clone(),
             send: "later".into(),
             image: None,
+            slash: false,
         });
         let text = render_text(&mut app, 100, 30);
         let footer = text.lines().last().unwrap_or("").to_string();
