@@ -159,6 +159,16 @@ async fn main() -> anyhow::Result<()> {
         } => cmd_run(prompt, model, session, cont, yes, cli.model).await?,
         Commands::Doctor => cmd::doctor::cmd_doctor(cli.config).await?,
         Commands::Gc { days, dry_run } => cmd::manage::cmd_gc(days, dry_run)?,
+        Commands::RunLoop {
+            queue,
+            model,
+            max_tasks,
+            token_budget,
+            yes,
+        } => {
+            cmd::runloop::cmd_run_loop(queue, model, max_tasks, token_budget, yes, cli.model)
+                .await?
+        }
         Commands::Sessions { all, search, limit } => cmd::manage::cmd_sessions(all, search, limit)?,
         Commands::Resume { session } => cmd::manage::cmd_resume(session)?,
         Commands::Fork { session, at } => cmd::manage::cmd_fork(session, at)?,

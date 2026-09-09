@@ -102,6 +102,27 @@ pub(crate) enum Commands {
     },
 
     #[command(
+        visible_alias = "batch",
+        about = "Run tasks/pending/*.md overnight: one fresh session per task, validate, scoped git commit, quarantine failures"
+    )]
+    RunLoop {
+        #[arg(long, default_value = "tasks")]
+        queue: String,
+
+        #[arg(long)]
+        model: Option<String>,
+
+        #[arg(long)]
+        max_tasks: Option<usize>,
+
+        #[arg(long, default_value = "0")]
+        token_budget: u64,
+
+        #[arg(long, short, env = "VIORAHARNESS_AUTO_ALLOW")]
+        yes: bool,
+    },
+
+    #[command(
         visible_alias = "open",
         visible_alias = "r",
         alias = "continue",
@@ -266,6 +287,54 @@ mod tests {
             Some(Commands::Gc { days, dry_run }) => {
                 assert_eq!(days, 30);
                 assert!(dry_run);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_run_loop() {
+        match Cli::try_parse_from(["vh", "run-loop"]).unwrap().command {
+            Some(Commands::RunLoop {
+                queue,
+                model,
+                max_tasks,
+                token_budget,
+                yes,
+            }) => {
+                assert_eq!(queue, "tasks");
+                assert!(model.is_none());
+                assert!(max_tasks.is_none());
+                assert_eq!(token_budget, 0);
+                assert!(!yes);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        match Cli::try_parse_from([
+            "vh",
+            "batch",
+            "--queue",
+            "work",
+            "--max-tasks",
+            "3",
+            "--token-budget",
+            "50000",
+            "-y",
+        ])
+        .unwrap()
+        .command
+        {
+            Some(Commands::RunLoop {
+                queue,
+                max_tasks,
+                token_budget,
+                yes,
+                ..
+            }) => {
+                assert_eq!(queue, "work");
+                assert_eq!(max_tasks, Some(3));
+                assert_eq!(token_budget, 50000);
+                assert!(yes);
             }
             other => panic!("unexpected: {other:?}"),
         }

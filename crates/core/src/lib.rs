@@ -5,6 +5,7 @@ pub mod mcp;
 pub mod observe;
 pub mod permissions;
 pub mod provider;
+pub mod runloop;
 pub mod sandbox;
 pub mod session;
 pub mod skills;

@@ -10,3 +10,9 @@ snapshots/
 AGENTS.md
 roadmap.md
 RESEARCH.md
+
+# run-loop task queues are live work state; keep the template README only.
+tasks/pending/
+tasks/done/
+tasks/failed/
+!tasks/README.md
