@@ -900,6 +900,10 @@ mod tests {
         assert_eq!(app.rewind_armed, Some(2), "armed at turn-1 target seq");
         let armed_text = render_text(&mut app, 100, 30);
         assert!(armed_text.contains("ARMED"), "armed banner shown");
+        assert!(
+            armed_text.contains("drop 1 message"),
+            "banner previews consequences: {armed_text:?}"
+        );
         app.handle_popup_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
         assert_eq!(app.rewind_armed, None, "navigation disarms");
         app.handle_popup_key(KeyEvent::new(KeyCode::Up, KeyModifiers::empty()));
@@ -913,7 +917,7 @@ mod tests {
         assert!(
             app.messages
                 .iter()
-                .any(|m| m.content.contains("rewound to #2")),
+                .any(|m| m.content.contains("rewound to checkpoint #1")),
             "report message shown"
         );
         let _ = std::fs::remove_dir_all(&dir);
@@ -926,11 +930,37 @@ mod tests {
         let mut app = test_app();
         app.session_id = "sess-rewind".into();
         app.handle_slash("/rewind");
+        app.handle_popup_key(KeyEvent::new(KeyCode::Home, KeyModifiers::empty()));
         app.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
-        assert!(app.rewind_armed.is_some());
+        assert!(app.rewind_armed.is_some(), "non-latest checkpoint arms");
         app.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
         assert_eq!(app.popup, Popup::None);
         assert_eq!(app.rewind_armed, None);
+        use vioraharness_core::session::SessionStore;
+        let store = SessionStore::new(db.to_str().unwrap()).unwrap();
+        assert_eq!(
+            store.get_messages("sess-rewind").unwrap().len(),
+            3,
+            "untouched"
+        );
+        restore_db_env(prev, &db);
+    }
+
+    #[test]
+    fn rewind_latest_checkpoint_refuses_as_noop() {
+        let (db, prev, _guard) = rewind_test_session("rewind-noop");
+        let mut app = test_app();
+        app.session_id = "sess-rewind".into();
+        app.handle_slash("/rewind");
+        // Cursor starts at the latest checkpoint: arming must refuse.
+        app.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.rewind_armed, None, "latest checkpoint never arms");
+        assert!(
+            app.status.contains("already latest"),
+            "refusal explained: {}",
+            app.status
+        );
+        assert_eq!(app.popup, Popup::Rewind, "dialog stays open");
         use vioraharness_core::session::SessionStore;
         let store = SessionStore::new(db.to_str().unwrap()).unwrap();
         assert_eq!(

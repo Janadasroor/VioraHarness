@@ -110,6 +110,18 @@ pub fn restore_latest(
     Ok(Some(target.to_string_lossy().to_string()))
 }
 
+/// DB seq to tag a snapshot with: the session's current max message seq.
+/// Falls back to 0 when the store is unreachable. Callers must use this
+/// (never an in-memory vec length or a constant) so snapshot `message_seq`
+/// values line up with what rewind compares against.
+pub fn current_seq_for(session_id: &str) -> i64 {
+    std::env::var("VIORAHARNESS_DB")
+        .ok()
+        .and_then(|db| super::store::SessionStore::new(&db).ok())
+        .and_then(|store| store.latest_seq(session_id).ok())
+        .unwrap_or(0)
+}
+
 fn resolve_session_path(
     store: &super::store::SessionStore,
     session_id: &str,
@@ -139,6 +151,58 @@ pub struct RewindReport {
     /// earliest known content (file may have been created after the
     /// checkpoint — never deleted, user decides).
     pub earliest_state_files: Vec<String>,
+}
+
+/// What `rewind_to_seq` *would* do, without touching anything. Shown in the
+/// rewind dialog before the user confirms.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RewindPreview {
+    pub target_seq: i64,
+    pub drop_messages: usize,
+    pub drop_tool_calls: usize,
+    pub restore_files: usize,
+    pub prune_snapshots: usize,
+}
+
+impl RewindPreview {
+    pub fn is_noop(&self) -> bool {
+        self.drop_messages == 0 && self.prune_snapshots == 0
+    }
+}
+
+pub fn preview_rewind(
+    store: &super::store::SessionStore,
+    session_id: &str,
+    target_seq: i64,
+) -> Result<RewindPreview> {
+    let conn = store.pool.get()?;
+    let drop_messages: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM messages WHERE session_id = ?1 AND seq > ?2",
+        rusqlite::params![session_id, target_seq],
+        |r| r.get(0),
+    )?;
+    let drop_tool_calls: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tool_calls WHERE session_id = ?1 AND message_seq > ?2",
+        rusqlite::params![session_id, target_seq],
+        |r| r.get(0),
+    )?;
+    let prune_snapshots: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM snapshots WHERE session_id = ?1 AND message_seq > ?2",
+        rusqlite::params![session_id, target_seq],
+        |r| r.get(0),
+    )?;
+    let restore_files: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT path) FROM snapshots WHERE session_id = ?1",
+        rusqlite::params![session_id],
+        |r| r.get(0),
+    )?;
+    Ok(RewindPreview {
+        target_seq,
+        drop_messages: drop_messages as usize,
+        drop_tool_calls: drop_tool_calls as usize,
+        restore_files: restore_files as usize,
+        prune_snapshots: prune_snapshots as usize,
+    })
 }
 
 /// Rewind a session to `target_seq`: every snapshotted file returns to its
@@ -400,5 +464,47 @@ mod tests {
         assert_eq!(rep.restored_files, vec!["sub/rel.cir".to_string()]);
         assert_eq!(std::fs::read(work.join("sub/rel.cir")).unwrap(), b"orig");
         let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn preview_rewind_counts_without_changing_anything() {
+        use crate::session::SessionStore;
+        let s = SessionStore::new_in_memory().unwrap();
+        s.create_session("sess", "m", None).unwrap();
+        for i in 1..=4 {
+            s.append_message("sess", "user", &format!("m{i}")).unwrap();
+        }
+        s.record_tool_call("c4", "sess", 4, "write", &serde_json::json!({}))
+            .unwrap();
+        s.insert_snapshot("sess", 2, "f.txt", "s", b"v").unwrap();
+        s.insert_snapshot("sess", 3, "g.txt", "s", b"w").unwrap();
+
+        let p = preview_rewind(&s, "sess", 2).unwrap();
+        assert_eq!(p.target_seq, 2);
+        assert!(!p.is_noop());
+        assert_eq!((p.drop_messages, p.drop_tool_calls), (2, 1));
+        assert_eq!(p.restore_files, 2);
+        assert_eq!(p.prune_snapshots, 1);
+        assert_eq!(s.get_messages("sess").unwrap().len(), 4, "untouched");
+        assert_eq!(s.get_snapshots("sess").unwrap().len(), 2, "untouched");
+
+        let latest = preview_rewind(&s, "sess", 4).unwrap();
+        assert!(latest.is_noop(), "rewinding to max changes nothing");
+    }
+
+    #[test]
+    fn current_seq_for_falls_back_to_zero() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_DB").ok();
+        let db = std::env::temp_dir().join(format!("vh_seqfb_{}", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        std::env::set_var("VIORAHARNESS_DB", &db);
+        // Unknown session (fresh DB): safe fallback, never a panic.
+        assert_eq!(current_seq_for("nope"), 0);
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_DB", v),
+            None => std::env::remove_var("VIORAHARNESS_DB"),
+        }
+        let _ = std::fs::remove_file(&db);
     }
 }

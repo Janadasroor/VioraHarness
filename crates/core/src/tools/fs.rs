@@ -330,7 +330,8 @@ pub async fn edit_file(args: Value) -> Value {
 
     if let Some(sid) = args.get("session_id").and_then(|v| v.as_str()) {
         let snap = crate::session::snapshot::UndoStack::new();
-        snap.push(sid, 0, &path.to_string_lossy()).await;
+        let seq = crate::session::snapshot::current_seq_for(sid);
+        snap.push(sid, seq, &path.to_string_lossy()).await;
     }
     if let Err(e) = fs::write(&path, &new_content).await {
         return json!({"ok": false, "error": e.to_string()});
@@ -933,6 +934,10 @@ mod tests {
 
     #[tokio::test]
     async fn traversal_via_tmp_dotdot_denied() {
+        // Depends on default env (no blanket approval): serialize against
+        // tests that set VIORAHARNESS_APPROVED_CALL, even though this test
+        // itself mutates nothing.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let pid = std::process::id();
 
         let evil = format!("/tmp/../vh-outside-{pid}/x.txt");
@@ -984,6 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn edit_outside_root_denied() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = edit_file(json!({"path": "/etc/vh-nope-x", "old_string": "a", "new_string": "b"}))
             .await;
         assert_eq!(r["ok"], false);

@@ -396,7 +396,7 @@ pub async fn apply_patch_text(patch_text: &str, session_id: &str) -> serde_json:
                         return json!({"ok": false, "error": format!("*** Delete File: read {path}: {e}")})
                     }
                 };
-                snap.push(session_id, 0, &rp.to_string_lossy()).await;
+                snap.push(session_id, crate::session::snapshot::current_seq_for(session_id), &rp.to_string_lossy()).await;
                 if let Err(e) = tokio::fs::remove_file(rp).await {
                     return json!({"ok": false, "error": format!("delete {path}: {e}")});
                 }
@@ -420,7 +420,7 @@ pub async fn apply_patch_text(patch_text: &str, session_id: &str) -> serde_json:
                 if old.ends_with('\n') && !new_content.is_empty() {
                     new_content.push('\n');
                 }
-                snap.push(session_id, 0, &rp.to_string_lossy()).await;
+                snap.push(session_id, crate::session::snapshot::current_seq_for(session_id), &rp.to_string_lossy()).await;
                 if let Err(e) = tokio::fs::write(rp, &new_content).await {
                     return json!({"ok": false, "error": format!("write {path}: {e}")});
                 }
@@ -452,7 +452,7 @@ pub async fn apply_patch_text(patch_text: &str, session_id: &str) -> serde_json:
                 if dst.exists() {
                     return json!({"ok": false, "error": format!("*** Move: destination exists: {to}")});
                 }
-                snap.push(session_id, 0, &src.to_string_lossy()).await;
+                snap.push(session_id, crate::session::snapshot::current_seq_for(session_id), &src.to_string_lossy()).await;
                 if let Some(parent) = dst.parent() {
                     if let Err(e) = tokio::fs::create_dir_all(parent).await {
                         return json!({"ok": false, "error": format!("mkdir for {to}: {e}")});
@@ -604,6 +604,8 @@ mod tests {
 
     #[tokio::test]
     async fn executor_update_add_delete() {
+        // Asserts jail denial: serialize against tests that approve all.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = test_dir("exec");
         let a = dir.join("a.txt");
         std::fs::write(&a, "one\ntwo\nthree\n").unwrap();

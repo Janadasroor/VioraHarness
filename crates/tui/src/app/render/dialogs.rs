@@ -1064,9 +1064,13 @@ impl App {
                 }
                 lines.push(Line::from(""));
                 if let Some(seq) = self.rewind_armed {
+                    let detail = self
+                        .rewind_armed_note
+                        .as_deref()
+                        .unwrap_or("restore checkpoint");
                     lines.push(Line::from(vec![
                         Span::styled(
-                            format!(" ARMED at #{seq} — Enter again to rewind, Esc cancels "),
+                            format!(" ARMED at #{seq} ({detail}) — Enter again, Esc cancels "),
                             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                         ),
                     ]));

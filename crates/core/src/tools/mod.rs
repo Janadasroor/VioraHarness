@@ -739,4 +739,40 @@ mod tests {
             "{r}"
         );
     }
+
+    #[tokio::test]
+    async fn edit_snapshot_uses_db_seq_not_zero() {
+        // Snapshots must carry the session's DB seq so rewind targets line up.
+        use crate::session::SessionStore;
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_DB").ok();
+        let dir = std::env::temp_dir().join(format!("vh-seq-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("t.db");
+        std::env::set_var("VIORAHARNESS_DB", &db);
+        let f = dir.join("f.txt").to_string_lossy().to_string();
+        std::fs::write(dir.join("f.txt"), "hello world\n").unwrap();
+        {
+            let store = SessionStore::new(db.to_str().unwrap()).unwrap();
+            store.create_session("sess-seq", "m", None).unwrap();
+            store.append_message("sess-seq", "user", "fix it").unwrap();
+            store.append_message("sess-seq", "assistant", "on it").unwrap();
+        }
+        let r = execute_tool(
+            "edit",
+            json!({"path": f, "old_string": "world", "new_string": "there", "session_id": "sess-seq"}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        let store = SessionStore::new(db.to_str().unwrap()).unwrap();
+        let snaps = store.get_snapshots("sess-seq").unwrap();
+        assert_eq!(snaps.len(), 1);
+        assert_eq!(snaps[0].0, 2, "snapshot tagged with DB seq, not 0");
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_DB", v),
+            None => std::env::remove_var("VIORAHARNESS_DB"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

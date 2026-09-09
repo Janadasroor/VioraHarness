@@ -205,6 +205,7 @@ impl App {
                 } else {
                     self.rewind_cursor = 0;
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     // Start at the latest message; ↑ walks back through checkpoints.
                     let len = rewind_checkpoints(&self.session_id).len();
                     if len > 0 {

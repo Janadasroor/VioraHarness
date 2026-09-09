@@ -225,6 +225,14 @@ impl AgentLoop {
             }
         }
 
+        // Anchor for this turn's file snapshots: the DB seq, captured once.
+        // (An in-memory vec length would drift from DB seqs and misalign
+        // rewind targets — every snapshot in this turn belongs here.)
+        let turn_seq: i64 = store
+            .as_ref()
+            .and_then(|s| s.latest_seq(&session_id).ok())
+            .unwrap_or(0);
+
         let provider_tools: Vec<ToolDefForProvider> = self.registry.to_provider_tools();
         #[allow(unused_assignments)]
         let mut final_text: String = String::new();
@@ -642,7 +650,7 @@ impl AgentLoop {
                                 if name == "write" {
                                     if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
                                         let snap = crate::session::snapshot::UndoStack::new();
-                                        let seq = messages.len() as i64;
+                                        let seq = turn_seq;
                                         snap.push(&session_id, seq, p).await;
                                     }
                                 }
@@ -684,7 +692,7 @@ impl AgentLoop {
                                                 if name == "write" {
                                                     if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
                                                         let snap = crate::session::snapshot::UndoStack::new();
-                                                        let seq = messages.len() as i64;
+                                                        let seq = turn_seq;
                                                         snap.push(&session_id, seq, p).await;
                                                     }
                                                 }
@@ -698,7 +706,7 @@ impl AgentLoop {
                                                 if name == "write" {
                                                     if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
                                                         let snap = crate::session::snapshot::UndoStack::new();
-                                                        let seq = messages.len() as i64;
+                                                        let seq = turn_seq;
                                                         snap.push(&session_id, seq, p).await;
                                                     }
                                                 }
@@ -733,7 +741,7 @@ impl AgentLoop {
                                 if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
                                     let snap = crate::session::snapshot::UndoStack::new();
 
-                                    let seq = messages.len() as i64;
+                                    let seq = turn_seq;
                                     snap.push(&session_id, seq, p).await;
                                 }
                             }

@@ -1,3 +1,4 @@
+use super::popups::rewind_checkpoints;
 use super::*;
 
 impl App {
@@ -181,9 +182,13 @@ impl App {
                 .map_err(|e| format!("rewind failed: {e}"))?;
             let _ = self.reload_display_from_store(&store, &sid);
             self.scroll = 0;
+            let checkpoint: String = rewind_checkpoints(&sid)
+                .into_iter()
+                .find(|p| p.target_seq == target_seq)
+                .map(|p| format!("#{}", p.user_seq))
+                .unwrap_or_else(|| format!("message #{target_seq}"));
             let mut parts = vec![format!(
-                "rewound to #{} — dropped {} message{}",
-                target_seq,
+                "rewound to checkpoint {checkpoint} — dropped {} message{}",
                 rep.dropped_messages,
                 if rep.dropped_messages == 1 { "" } else { "s" }
             )];

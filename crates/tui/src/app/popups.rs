@@ -284,12 +284,14 @@ impl App {
             Popup::Rewind => match key.code {
                 KeyCode::Up => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     if self.rewind_cursor > 0 {
                         self.rewind_cursor -= 1;
                     }
                 }
                 KeyCode::Down => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     let len = rewind_checkpoints(&self.session_id).len();
                     if len > 0 && self.rewind_cursor + 1 < len {
                         self.rewind_cursor += 1;
@@ -297,11 +299,13 @@ impl App {
                 }
                 KeyCode::PageUp => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     let page = popup_list_visible(6);
                     self.rewind_cursor = self.rewind_cursor.saturating_sub(page);
                 }
                 KeyCode::PageDown => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     let len = rewind_checkpoints(&self.session_id).len();
                     let page = popup_list_visible(6);
                     if len > 0 {
@@ -310,10 +314,12 @@ impl App {
                 }
                 KeyCode::Home => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     self.rewind_cursor = 0;
                 }
                 KeyCode::End => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     let len = rewind_checkpoints(&self.session_id).len();
                     if len > 0 {
                         self.rewind_cursor = len - 1;
@@ -324,19 +330,17 @@ impl App {
                     if let Some(p) = points.get(self.rewind_cursor).cloned() {
                         if self.rewind_armed == Some(p.target_seq) {
                             self.rewind_armed = None;
+                            self.rewind_armed_note = None;
                             self.popup = Popup::None;
                             self.do_rewind_to_seq(p.target_seq);
                         } else {
-                            self.rewind_armed = Some(p.target_seq);
-                            self.status = format!(
-                                "rewind armed at #{} — Enter again to restore, Esc cancels",
-                                p.user_seq
-                            );
+                            self.arm_rewind_checkpoint(&p);
                         }
                     }
                 }
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
                     self.rewind_armed = None;
+                    self.rewind_armed_note = None;
                     self.popup = Popup::None;
                 }
                 _ => {}
@@ -1520,6 +1524,73 @@ pub(crate) fn rewind_checkpoints(session_id: &str) -> Vec<RewindCheckpoint> {
         prev_target = p.target_seq;
     }
     points
+}
+
+impl App {
+    /// First Enter on a checkpoint: preview consequences and arm — or refuse
+    /// outright when rewinding would change nothing (e.g. latest checkpoint).
+    pub(crate) fn arm_rewind_checkpoint(&mut self, p: &RewindCheckpoint) {
+        let db = std::env::var("VIORAHARNESS_DB")
+            .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+        let preview = vioraharness_core::session::SessionStore::new(&db)
+            .ok()
+            .and_then(|store| {
+                vioraharness_core::session::snapshot::preview_rewind(
+                    &store,
+                    &self.session_id,
+                    p.target_seq,
+                )
+                .ok()
+            });
+        let note = preview.map(|r| {
+            let mut parts = vec![format!(
+                "drop {} message{}",
+                r.drop_messages,
+                if r.drop_messages == 1 { "" } else { "s" }
+            )];
+            if r.restore_files > 0 {
+                parts.push(format!(
+                    "restore {} file{}",
+                    r.restore_files,
+                    if r.restore_files == 1 { "" } else { "s" }
+                ));
+            }
+            if r.prune_snapshots > 0 {
+                parts.push(format!(
+                    "prune {} snapshot{}",
+                    r.prune_snapshots,
+                    if r.prune_snapshots == 1 { "" } else { "s" }
+                ));
+            }
+            (r.is_noop(), parts.join(", "))
+        });
+        match note {
+            Some((true, _)) => {
+                self.rewind_armed = None;
+                self.rewind_armed_note = None;
+                self.status = format!(
+                    "checkpoint #{} is already latest — nothing to rewind",
+                    p.user_seq
+                );
+            }
+            Some((false, detail)) => {
+                self.rewind_armed = Some(p.target_seq);
+                self.rewind_armed_note = Some(detail.clone());
+                self.status = format!(
+                    "rewind armed at #{} ({detail}) — Enter again to restore, Esc cancels",
+                    p.user_seq
+                );
+            }
+            None => {
+                self.rewind_armed = Some(p.target_seq);
+                self.rewind_armed_note = None;
+                self.status = format!(
+                    "rewind armed at #{} — Enter again to restore, Esc cancels",
+                    p.user_seq
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]

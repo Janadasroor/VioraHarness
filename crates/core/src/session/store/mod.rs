@@ -388,6 +388,20 @@ mod tests {
     }
 
     #[test]
+    fn latest_seq_tracks_max_message_seq() {
+        // Snapshot writers must use this (never vec lengths or constants)
+        // so rewind targets line up with stored snapshots.
+        let s = mem_store();
+        assert_eq!(s.latest_seq("sess").unwrap(), 0);
+        s.create_session("sess", "m", None).unwrap();
+        assert_eq!(s.latest_seq("sess").unwrap(), 0);
+        s.append_message("sess", "user", "one").unwrap();
+        s.append_message("sess", "assistant", "two").unwrap();
+        assert_eq!(s.latest_seq("sess").unwrap(), 2);
+        assert_eq!(s.latest_seq("missing").unwrap(), 0);
+    }
+
+    #[test]
     fn todos_replace_and_read() {
         let s = mem_store();
         s.create_session("sess", "m", None).unwrap();

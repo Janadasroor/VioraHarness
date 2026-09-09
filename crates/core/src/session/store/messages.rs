@@ -5,6 +5,18 @@ impl SessionStore {
         self.append_message_full(session_id, role, content, None, None, None, None)
     }
 
+    /// Highest message seq in the session (0 when empty). Snapshot writers
+    /// must use this — never an in-memory vec length — so snapshot
+    /// `message_seq` values line up with what rewind compares against.
+    pub fn latest_seq(&self, session_id: &str) -> Result<i64> {
+        let conn = self.pool.get()?;
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE session_id = ?1",
+            params![session_id],
+            |r| r.get(0),
+        )?)
+    }
+
     fn timestamp_now() -> String {
         std::process::Command::new("date")
             .arg("+%H:%M")

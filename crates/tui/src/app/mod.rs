@@ -71,6 +71,7 @@ pub struct App {
     pub(crate) error_cursor: usize,
     pub(crate) rewind_cursor: usize,
     pub(crate) rewind_armed: Option<i64>,
+    pub(crate) rewind_armed_note: Option<String>,
     pub(crate) session_filter: String,
 
     pub(crate) provider_cursor: usize,
@@ -1300,6 +1301,7 @@ impl App {
             error_cursor: 0,
             rewind_cursor: 0,
             rewind_armed: None,
+            rewind_armed_note: None,
             session_filter: String::new(),
             provider_cursor: 0,
             provider_key_input: String::new(),
