@@ -143,6 +143,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Serve { port } => {
             vioraharness_server::serve(port).await?;
         }
+        Commands::Shim { port } => {
+            cmd::shim::cmd_shim(port).await?;
+        }
         Commands::Run {
             prompt,
             model,

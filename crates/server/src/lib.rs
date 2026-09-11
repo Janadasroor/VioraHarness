@@ -16,6 +16,8 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt as TokioStreamExt;
 
+pub mod shim;
+
 #[derive(Clone)]
 struct AppState {
     sessions: Arc<Mutex<HashMap<String, SessionMeta>>>,

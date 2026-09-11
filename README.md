@@ -13,6 +13,7 @@ cargo run -- tui                          # interactive Ratatui (Enter send, /he
 cargo run -- sessions                     # list persisted sessions
 cargo run -- undo                         # restore last file snapshot
 cargo run -- serve --port 4096            # HTTP SSE (loopback; bearer w/ VIORAHARNESS_API_TOKEN)
+cargo run -- shim --port 11435           # free-tier gateway shim for URL+key-only clients (-> /v1)
 ```
 
 ## Tools (typed JSON Schema, validated before exec)

@@ -36,6 +36,14 @@ pub(crate) enum Commands {
         port: u16,
     },
 
+    #[command(
+        about = "Free-tier gateway shim for URL+key-only clients: point them at http://127.0.0.1:PORT/v1"
+    )]
+    Shim {
+        #[arg(long, default_value = "11435")]
+        port: u16,
+    },
+
     #[command(visible_alias = "ask", alias = "prompt")]
     Run {
         prompt: String,
@@ -259,6 +267,11 @@ mod tests {
         let cli = Cli::try_parse_from(["vh", "serve", "--port", "5000"]).unwrap();
         match cli.command {
             Some(Commands::Serve { port }) => assert_eq!(port, 5000),
+            other => panic!("unexpected: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["vh", "shim"]).unwrap();
+        match cli.command {
+            Some(Commands::Shim { port }) => assert_eq!(port, 11435),
             other => panic!("unexpected: {other:?}"),
         }
         let cli = Cli::try_parse_from(["vh", "check"]).unwrap();
