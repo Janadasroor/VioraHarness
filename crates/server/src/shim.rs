@@ -399,6 +399,52 @@ async fn forward_translated(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
+/// Fill `context_length`/`context_window` on each model entry so clients
+/// without their own catalog stop assuming a tiny default. Unknown models
+/// fall back to 128k, matching the main provider.
+pub fn enrich_models_list(
+    mut list: Value,
+    sizes: &std::collections::HashMap<String, usize>,
+) -> Value {
+    use vioraharness_core::provider::catalog::match_or_context;
+    if let Some(arr) = list.get_mut("data").and_then(Value::as_array_mut) {
+        for m in arr.iter_mut() {
+            let id = m
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let ctx = match_or_context(&id, sizes).unwrap_or(128_000);
+            m["context_length"] = Value::from(ctx);
+            m["context_window"] = Value::from(ctx);
+        }
+    }
+    list
+}
+
+async fn forward_models(state: &ShimState, parts: &axum::http::request::Parts) -> Response {
+    use vioraharness_core::provider::catalog::openrouter_context_cached;
+    let upstream = match state
+        .client
+        .get(format!("{UPSTREAM}/models"))
+        .headers(forward_headers(parts))
+        .send()
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("shim models upstream failed: {e:#}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    let list: Value = match upstream.json().await {
+        Ok(v) => v,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let sizes = openrouter_context_cached().await;
+    Json(enrich_models_list(list, &sizes)).into_response()
+}
+
 async fn forward(
     State(state): State<ShimState>,
     OriginalUri(uri): OriginalUri,
@@ -412,6 +458,10 @@ async fn forward(
             "usage": "point an OpenAI-compatible client at /v1 with any key",
         }))
         .into_response();
+    }
+    if rel == "models" && req.method() == axum::http::Method::GET {
+        let (parts, _) = req.into_parts();
+        return forward_models(&state, &parts).await;
     }
     let mut url = format!("{UPSTREAM}/{rel}");
     if let Some(q) = uri.query() {
@@ -536,6 +586,26 @@ mod tests {
     fn session_id_has_stable_shape() {
         let id = shim_session_id();
         assert!(id.starts_with("vioraharness-shim-"), "{id}");
+    }
+
+    #[test]
+    fn models_list_gains_context_fields() {
+        use std::collections::HashMap;
+        let sizes: HashMap<String, usize> = [("meta/muse-spark-1.3-contributor".into(), 1048576)]
+            .into_iter()
+            .collect();
+        let list = serde_json::json!({
+            "object": "list",
+            "data": [
+                {"id": "muse-spark-1.3-contributor-free", "object": "model"},
+                {"id": "mystery-model-zzz", "object": "model"},
+            ],
+        });
+        let out = enrich_models_list(list, &sizes);
+        assert_eq!(out["data"][0]["context_length"], 1048576);
+        assert_eq!(out["data"][0]["context_window"], 1048576);
+        assert_eq!(out["data"][0]["id"], "muse-spark-1.3-contributor-free");
+        assert_eq!(out["data"][1]["context_length"], 128_000);
     }
 
     #[test]
