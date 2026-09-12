@@ -42,7 +42,8 @@ pub fn upstream_path(request_path: &str) -> String {
     let rel = request_path
         .strip_prefix("/v1")
         .unwrap_or(request_path)
-        .trim_start_matches('/');
+        .trim_start_matches('/')
+        .trim_end_matches('/');
     rel.to_string()
 }
 
@@ -437,9 +438,20 @@ async fn forward_models(state: &ShimState, parts: &axum::http::request::Parts) -
             return StatusCode::BAD_GATEWAY.into_response();
         }
     };
-    let list: Value = match upstream.json().await {
+    let status =
+        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let bytes = match upstream.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("shim models read failed: {e:#}");
+            return StatusCode::BAD_GATEWAY.into_response();
+        }
+    };
+    // Never fail the listing because enrichment did: pass the raw upstream
+    // body through when it is not the expected JSON.
+    let list: Value = match serde_json::from_slice(&bytes) {
         Ok(v) => v,
-        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+        Err(_) => return (status, bytes.to_vec()).into_response(),
     };
     let sizes = openrouter_context_cached().await;
     Json(enrich_models_list(list, &sizes)).into_response()
