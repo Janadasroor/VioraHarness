@@ -325,7 +325,10 @@ async fn forward_translated(
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            tracing::info!("shim POST /responses ({}) -> {}", model_bare, r.status());
+            r
+        }
         Err(e) => {
             tracing::warn!("shim responses upstream failed: {e:#}");
             return StatusCode::BAD_GATEWAY.into_response();
@@ -443,6 +446,7 @@ async fn forward(
         .get("user-agent")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("-");
+    let t0 = std::time::Instant::now();
     tracing::info!("shim {} {} ua={}", req.method(), uri.path(), ua);
     let mut url = format!("{UPSTREAM}/{rel}");
     if let Some(q) = uri.query() {
@@ -495,7 +499,16 @@ async fn forward(
         .send()
         .await
     {
-        Ok(r) => r,
+        Ok(r) => {
+            tracing::info!(
+                "shim {} {} -> {} in {}ms",
+                parts.method,
+                uri.path(),
+                r.status(),
+                t0.elapsed().as_millis()
+            );
+            r
+        }
         Err(e) => {
             tracing::warn!("shim upstream failed: {e:#}");
             return StatusCode::BAD_GATEWAY.into_response();
