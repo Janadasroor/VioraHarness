@@ -6,6 +6,10 @@ pub(crate) struct QueuedPrompt {
     /// Deferred slash command: run via the command handler when idle
     /// instead of sending as a model prompt.
     pub(crate) slash: bool,
+    /// Echo the prompt into chat when its turn starts. User-typed prompts
+    /// echo (so display order always matches execution order); deferred
+    /// commands and task follow-ups do not.
+    pub(crate) echo: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -39,6 +39,7 @@ impl App {
                     send: Self::task_wake_prompt(&done),
                     image: None,
                     slash: false,
+                    echo: false,
                 });
                 self.status = format!(
                     "task {} finished — follow-up queued ({})",
@@ -165,7 +166,8 @@ impl App {
                 pending_img = None;
             }
         }
-        self.messages.push(Msg::new("user", send.clone()));
+        // No chat echo here: the prompt appears when its turn starts (see
+        // drain_queue), so display order always matches execution order.
         self.input.push_history(history_text);
         self.input.text.clear();
         self.input.cursor = 0;
@@ -174,6 +176,7 @@ impl App {
             send,
             image: pending_img.map(|img| (img.mime.to_string(), img.b64)),
             slash: false,
+            echo: true,
         });
         let n = self.queued_prompts.len();
         self.status = if n == 1 {
@@ -184,7 +187,9 @@ impl App {
     }
 
     /// Send queued prompts in order, but only once the agent is fully
-    /// idle — never injected into a running turn. Deferred slash commands
+    /// idle — never injected into a running turn. Each prompt is echoed
+    /// into chat as its turn starts (never at queue time), so display
+    /// order always matches execution order. Deferred slash commands
     /// run through the command handler; the first model prompt starts a
     /// turn and the rest wait for the next idle drain.
     pub(crate) fn drain_queue(&mut self) {
@@ -222,6 +227,9 @@ impl App {
                     "sending queued prompt ({} more waiting)…",
                     self.queued_prompts.len()
                 );
+            }
+            if q.echo {
+                self.messages.push(Msg::new("user", q.send.clone()));
             }
             self.start_turn(q.send, q.image);
             return;
@@ -537,6 +545,7 @@ mod tests {
 
     #[tokio::test]
     async fn typing_and_queue_work_while_busy() {
+        let (db, prev, _env_guard) = with_temp_db("queue-echo");
         let mut app = test_app();
         app.busy = true;
 
@@ -551,16 +560,36 @@ mod tests {
         assert_eq!(app.queued_prompts[0].session_id, app.session_id);
         assert!(app.busy, "running turn untouched");
         assert!(
-            app.messages
-                .iter()
-                .any(|m| m.role == "user" && m.content == "hi"),
-            "queued prompt echoed"
+            !app.messages.iter().any(|m| m.role == "user"),
+            "no echo until the queued turn starts"
         );
 
         app.input.text = "second".into();
         app.input.cursor = 6;
         app.handle_key(KeyCode::Enter).await.unwrap();
         assert_eq!(app.queued_prompts.len(), 2);
+
+        // Turn ends: first queued prompt echoes as its turn starts.
+        app.busy = false;
+        app.drain_queue();
+        assert!(app.busy, "queued turn started");
+        assert_eq!(app.queued_prompts.len(), 1, "one slot consumed");
+        let users: Vec<_> = app
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .map(|m| m.content.clone())
+            .collect();
+        assert_eq!(
+            users,
+            vec!["hi".to_string()],
+            "echo at turn start: {users:?}"
+        );
+        if let Some(h) = app.pending.take() {
+            h.abort();
+        }
+        app.busy = false;
+        restore_db_env(prev, &db);
     }
 
     #[tokio::test]
@@ -611,10 +640,17 @@ mod tests {
             send: "drained-next".into(),
             image: None,
             slash: false,
+            echo: true,
         });
         app.drain_queue();
         assert!(app.busy, "turn started");
         assert!(app.queued_prompts.is_empty(), "slot consumed");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "drained-next"),
+            "echoed at turn start"
+        );
         if let Some(h) = app.pending.take() {
             h.abort();
         }
@@ -625,15 +661,23 @@ mod tests {
             send: "stale".into(),
             image: None,
             slash: false,
+            echo: false,
         });
         app.queued_prompts.push(QueuedPrompt {
             session_id: app.session_id.clone(),
             send: "fresh".into(),
             image: None,
             slash: false,
+            echo: true,
         });
         app.drain_queue();
         assert!(app.busy, "fresh slot fired after dropping stale");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "fresh"),
+            "survivor echoed at turn start"
+        );
         assert!(
             app.messages
                 .iter()
@@ -662,13 +706,23 @@ mod tests {
         assert_eq!(app.queued_prompts.len(), 2, "both queued");
         assert!(!app.queued_prompts[0].slash);
         assert!(app.queued_prompts[1].slash, "command deferred second");
+        assert!(
+            !app.messages.iter().any(|m| m.role == "user"),
+            "nothing echoed while busy"
+        );
 
-        // Turn ends: the prompt fires first, the command waits.
+        // Turn ends: the prompt echoes and fires first, the command waits.
         app.busy = false;
         app.drain_queue();
         assert!(app.busy, "prompt turn started");
         assert_eq!(app.queued_prompts.len(), 1, "slash still waiting");
         assert!(app.queued_prompts[0].slash);
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "first"),
+            "prompt echoed at turn start"
+        );
         if let Some(h) = app.pending.take() {
             h.abort();
         }
@@ -694,6 +748,7 @@ mod tests {
             send: "doomed".into(),
             image: None,
             slash: false,
+            echo: true,
         });
         app.handle_key(KeyCode::Esc).await.unwrap();
         assert!(!app.busy, "turn cancelled");
@@ -723,6 +778,7 @@ mod tests {
             send: "later".into(),
             image: None,
             slash: false,
+            echo: true,
         });
         let text = render_text(&mut app, 100, 30);
         let footer = text.lines().last().unwrap_or("").to_string();

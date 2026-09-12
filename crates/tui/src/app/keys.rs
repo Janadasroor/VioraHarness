@@ -236,6 +236,7 @@ impl App {
                             send: prompt,
                             image: None,
                             slash: true,
+                            echo: false,
                         });
                         self.input.text.clear();
                         self.input.cursor = 0;
