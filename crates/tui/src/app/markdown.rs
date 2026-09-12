@@ -1,4 +1,6 @@
-use super::latex::{translate_bare_latex_chunk, translate_latex};
+use super::latex::{
+    render_display_math, render_inline_math, translate_bare_latex_chunk, translate_latex,
+};
 use crate::theme::Theme;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -36,7 +38,7 @@ pub(crate) fn markdown_inline_spans(text: &str) -> Vec<Span<'static>> {
                 let inner = &s[i + 2..i + 2 + end];
                 if !inner.is_empty() && !inner.contains('\n') {
                     out.push(Span::styled(
-                        translate_latex(inner),
+                        render_inline_math(inner),
                         crate::theme::Theme::math(),
                     ));
                     i += 2 + end + 2;
@@ -70,7 +72,7 @@ pub(crate) fn markdown_inline_spans(text: &str) -> Vec<Span<'static>> {
                     let inner = &rest[..j];
                     if !inner.is_empty() && !inner.contains('$') {
                         out.push(Span::styled(
-                            translate_latex(inner),
+                            render_inline_math(inner),
                             crate::theme::Theme::math(),
                         ));
                         i += 1 + j + 1;
@@ -90,7 +92,7 @@ pub(crate) fn markdown_inline_spans(text: &str) -> Vec<Span<'static>> {
                     let inner = &s[i + 2..i + 2 + end];
                     if !inner.is_empty() && !inner.contains('\n') {
                         out.push(Span::styled(
-                            translate_latex(inner),
+                            render_inline_math(inner),
                             crate::theme::Theme::math(),
                         ));
                         i += 2 + end + 2;
@@ -104,7 +106,7 @@ pub(crate) fn markdown_inline_spans(text: &str) -> Vec<Span<'static>> {
                     let inner = &s[i + 2..i + 2 + end];
                     if !inner.is_empty() && !inner.contains('\n') {
                         out.push(Span::styled(
-                            translate_latex(inner),
+                            render_inline_math(inner),
                             crate::theme::Theme::math(),
                         ));
                         i += 2 + end + 2;
@@ -784,8 +786,11 @@ pub(crate) fn render_math_block(
         }
         (buf, consumed)
     };
-    let translated = translate_latex(&content);
     let mut rows: Vec<Vec<Span<'static>>> = Vec::new();
+    let translated = translate_latex(&content);
+    if let Some(art) = render_display_math(&content, max_width) {
+        return Some((math_block_rows(art, max_width), consumed));
+    }
     for eq in translated.lines() {
         let eq = eq.trim();
         if eq.is_empty() {
@@ -802,6 +807,22 @@ pub(crate) fn render_math_block(
         return None;
     }
     Some((rows, consumed))
+}
+
+fn math_block_rows(art: Vec<String>, max_width: usize) -> Vec<Vec<Span<'static>>> {
+    use unicode_width::UnicodeWidthStr as _;
+    // Center the block as a whole: per-line centering would destroy the
+    // internal alignment of the 2D layout.
+    let block = art.iter().map(|l| l.width()).max().unwrap_or(0);
+    let pad = max_width.saturating_sub(block) / 2;
+    art.into_iter()
+        .map(|eq| {
+            vec![
+                Span::raw(" ".repeat(pad)),
+                Span::styled(eq, crate::theme::Theme::math()),
+            ]
+        })
+        .collect()
 }
 
 pub(crate) fn render_table_block(
@@ -1363,14 +1384,17 @@ mod tests {
         ];
         let (rows, consumed) = render_math_block(&lines, 60).expect("block parses");
         assert_eq!(consumed, 4);
-        assert_eq!(rows.len(), 2);
+        assert_eq!(rows.len(), 8, "two stacked fractions, four rows each");
         let text: String = rows
             .iter()
             .flat_map(|row| row.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(!text.contains('\\'), "{text:?}");
-        assert!(text.contains("IL,peak = IL + (Δ I_L)/(2),"), "{text:?}");
-        assert!(text.contains("IL,valley = IL - (Δ I_L)/(2)"), "{text:?}");
+        assert!(text.contains("IL,peak"), "{text:?}");
+        assert!(text.contains("IL,valley"), "{text:?}");
+        // Capital-L subscript has no unicode form: stacked 2D fallback.
+        assert!(text.contains('Δ'), "{text:?}");
+        assert!(text.contains('─'), "{text:?}");
     }
 
     #[test]
@@ -1545,10 +1569,10 @@ mod tests {
         let spans = markdown_inline_spans("Einstein: $E = mc^2$ ok");
         let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(!text.contains('$'), "delimiters stripped: {text}");
-        assert!(text.contains("E = mc^2"), "{text}");
+        assert!(text.contains("E = mc²"), "{text}");
         let math = spans
             .iter()
-            .find(|s| s.content.contains("mc^2"))
+            .find(|s| s.content.contains("mc²"))
             .expect("math span present");
         assert_eq!(math.style, Theme::math());
 
@@ -1571,22 +1595,31 @@ mod tests {
         let lines = vec!["$$", r"\frac{1}{2} + \alpha", "$$"];
         let (rows, consumed) = render_math_block(&lines, 40).expect("block parses");
         assert_eq!(consumed, 3);
-        assert_eq!(rows.len(), 1);
-        let text: String = rows[0].iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("(1)/(2) + α"), "{text:?}");
-
-        assert!(text.starts_with(&" ".repeat(14)), "{text:?}");
+        assert_eq!(rows.len(), 3, "2D fraction art");
+        let body: Vec<&str> = rows.iter().map(|row| row[1].content.as_ref()).collect();
+        assert_eq!(body, vec!["1", "─ + α", "2"], "{body:?}");
+        // Block (width 5) centered in 40 cols: pad 17 on every row.
+        for row in &rows {
+            assert_eq!(row[0].content.as_ref(), &" ".repeat(17), "{row:?}");
+        }
 
         let lines = vec!["$$E = mc^2$$"];
         let (rows, consumed) = render_math_block(&lines, 40).expect("single-line");
         assert_eq!(consumed, 1);
+        assert_eq!(rows.len(), 1, "single-row art stays one row");
         let text: String = rows[0].iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("E = mc^2"), "{text:?}");
+        assert!(text.contains("E = mc²"), "{text:?}");
 
         let lines = vec![r"\[x &= 1 \\", r"y &= 2\]"];
         let (rows, consumed) = render_math_block(&lines, 40).expect("bracket form");
         assert_eq!(consumed, 2);
         assert_eq!(rows.len(), 2, "\\\\ splits equation lines");
+        let text: String = rows
+            .iter()
+            .flat_map(|row| row.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("x = 1") && text.contains("y = 2"), "{text:?}");
 
         assert!(render_math_block(&["$$x + y"], 40).is_none());
         assert!(render_math_block(&["plain"], 40).is_none());
