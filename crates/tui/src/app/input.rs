@@ -6,6 +6,9 @@ pub struct InputState {
     pub(crate) hist_idx: Option<usize>,
     pub(crate) draft: String,
     pub(crate) completion_idx: usize,
+    /// Persist history across restarts. False in tests so the suite never
+    /// touches the real history file.
+    pub(crate) persist: bool,
     /// Keyboard/mouse text selection anchor (byte index). The selection
     /// spans anchor..cursor; None means no selection.
     pub(crate) sel_anchor: Option<usize>,
@@ -185,11 +188,61 @@ impl InputState {
         if entry.trim().is_empty() {
             return;
         }
+        if self.history.last().is_some_and(|last| *last == entry) {
+            self.hist_idx = None;
+            return;
+        }
         self.history.push(entry);
         if self.history.len() > 100 {
             self.history.remove(0);
         }
         self.hist_idx = None;
+        if self.persist {
+            Self::save_history(&self.history);
+        }
+    }
+
+    /// Production constructor: history restored from disk, every push
+    /// saved back. Arrow-key navigation then works across restarts.
+    pub(crate) fn with_disk_history() -> Self {
+        let mut s = Self::default();
+        s.history = Self::load_history();
+        s.persist = true;
+        s
+    }
+
+    pub(crate) fn history_path() -> std::path::PathBuf {
+        if let Ok(p) = std::env::var("VIORAHARNESS_HISTORY") {
+            if !p.trim().is_empty() {
+                return std::path::PathBuf::from(p);
+            }
+        }
+        let base = std::env::var("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                std::path::PathBuf::from(home).join(".local/share")
+            });
+        base.join("vioraharness/prompt_history.json")
+    }
+
+    pub(crate) fn load_history() -> Vec<String> {
+        let mut hist: Vec<String> = std::fs::read_to_string(Self::history_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+        if hist.len() > 100 {
+            hist = hist.split_off(hist.len() - 100);
+        }
+        hist
+    }
+
+    fn save_history(hist: &[String]) {
+        let p = Self::history_path();
+        if let Some(parent) = p.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(p, serde_json::to_string(hist).unwrap_or_default());
     }
     pub(crate) fn hist_prev(&mut self) {
         self.sel_anchor = None;
@@ -328,6 +381,93 @@ mod tests {
         input.move_to_end(false);
         input.clear_selection();
         input
+    }
+
+    fn temp_history(
+        tag: &str,
+    ) -> (
+        std::path::PathBuf,
+        Option<String>,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let guard = crate::app::testkit::DB_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let p = std::env::temp_dir().join(format!("vh_hist_{tag}_{}_{n}", std::process::id()));
+        let prev = std::env::var("VIORAHARNESS_HISTORY").ok();
+        std::env::set_var("VIORAHARNESS_HISTORY", &p);
+        (p, prev, guard)
+    }
+
+    fn restore_history(path: &std::path::Path, prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_HISTORY", v),
+            None => std::env::remove_var("VIORAHARNESS_HISTORY"),
+        }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn history_survives_restart() {
+        let (path, prev, _env_guard) = temp_history("roundtrip");
+        let mut a = InputState::default();
+        a.persist = true;
+        a.push_history("first".into());
+        a.push_history("second".into());
+        drop(a);
+        let b = InputState::with_disk_history();
+        assert_eq!(b.history, vec!["first".to_string(), "second".to_string()]);
+        assert!(b.persist, "fresh instance keeps persisting");
+        restore_history(&path, prev);
+    }
+
+    #[test]
+    fn history_skips_consecutive_duplicates() {
+        let (path, prev, _env_guard) = temp_history("dedup");
+        let mut a = InputState::default();
+        a.persist = true;
+        a.push_history("same".into());
+        a.push_history("same".into());
+        assert_eq!(a.history.len(), 1);
+        assert_eq!(InputState::load_history().len(), 1);
+        restore_history(&path, prev);
+    }
+
+    #[test]
+    fn history_tolerates_missing_and_corrupt_files() {
+        let (path, prev, _env_guard) = temp_history("corrupt");
+        assert!(InputState::load_history().is_empty(), "missing file");
+        std::fs::write(&path, "not json{{").unwrap();
+        assert!(InputState::load_history().is_empty(), "corrupt file");
+        std::fs::write(&path, "[\"kept\", 42]").unwrap();
+        assert!(InputState::load_history().is_empty(), "wrong shape");
+        restore_history(&path, prev);
+    }
+
+    #[test]
+    fn history_caps_at_100_entries() {
+        let (path, prev, _env_guard) = temp_history("cap");
+        let mut a = InputState::default();
+        a.persist = true;
+        for i in 0..105 {
+            a.push_history(format!("p{i}"));
+        }
+        assert_eq!(a.history.len(), 100);
+        assert_eq!(a.history[0], "p5");
+        let disk: Vec<String> =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(disk.len(), 100);
+        restore_history(&path, prev);
+    }
+
+    #[test]
+    fn memory_only_by_default() {
+        let mut a = InputState::default();
+        assert!(!a.persist, "tests and non-TUI uses stay memory-only");
+        a.push_history("x".into());
+        assert_eq!(a.history, vec!["x".to_string()]);
     }
 
     #[test]

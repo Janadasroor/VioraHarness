@@ -1262,7 +1262,7 @@ impl App {
             model: model.clone(),
             session_id: sid,
             messages: Vec::new(),
-            input: InputState::default(),
+            input: InputState::with_disk_history(),
             scroll: 0,
             status: "ready".into(),
             should_quit: false,
