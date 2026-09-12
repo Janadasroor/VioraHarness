@@ -97,7 +97,6 @@ impl App {
         }
         let header = Paragraph::new(Line::from({
             let mut v = header_spans;
-            v.push(Span::raw(format!(" | {} msgs ", self.messages.len())));
             let nerr = vioraharness_core::observe::error_count();
             if nerr > 0 {
                 v.push(Span::styled(
