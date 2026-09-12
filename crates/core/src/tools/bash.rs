@@ -1,4 +1,4 @@
-use crate::loop_mod::{split_shell_segments, strip_wrappers};
+use crate::loop_mod::{split_shell_segments, strip_wrappers, wants_detach};
 use serde_json::{json, Value};
 use std::time::Duration;
 use tokio::process::Command as TokioCommand;
@@ -135,11 +135,15 @@ pub async fn bash(args: Value) -> Value {
         return json!({"ok": false, "error": "command denied by policy (destructive to the whole system; never auto-run)"});
     }
 
-    if args
+    let background = args
         .get("background")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
+        .unwrap_or(false);
+    if !background && wants_detach(&serde_json::to_string(&args).unwrap_or_default()) {
+        return json!({"ok": false, "error": "background launch blocked: detached processes (nohup/setsid/& jobs) cannot outlive this sandboxed call — every child is reaped on exit, so a server started this way dies immediately. Re-run the long-lived part with {\"background\": true} and follow it via the tasks system (/tasks); keep one-shot commands in the foreground."});
+    }
+
+    if background {
         let task = super::tasks::spawn_task(command, &cwd);
         return super::tasks::launch_result(&task);
     }
@@ -278,6 +282,25 @@ mod tests {
         for cmd in ["nohup rm -rf /", "timeout 5 rm -rf /", "sudo rm -rf /"] {
             assert!(is_annihilation(cmd), "wrapped annihilation: {cmd}");
         }
+    }
+
+    #[tokio::test]
+    async fn detach_attempt_steered_to_background_task() {
+        for cmd in [
+            "nohup python3 -m http.server 8111 &",
+            "python3 -m http.server 8111 & sleep 1; curl -s localhost:8111",
+        ] {
+            let r = bash(json!({"command": cmd})).await;
+            assert_eq!(r["ok"], false, "{cmd}");
+            assert!(
+                r["error"].as_str().unwrap().contains("background"),
+                "steers to background:true: {}",
+                r["error"]
+            );
+        }
+        // Contained lifetime still runs.
+        let r = bash(json!({"command": "sleep 0.1 & wait; echo done"})).await;
+        assert_eq!(r["ok"], true, "{r}");
     }
 
     #[tokio::test]

@@ -248,6 +248,17 @@ pub(crate) fn segment_is_dangerous(seg: &str) -> bool {
             .any(|t| matches!(*t, "-delete" | "-exec" | "-execdir" | "-ok" | "-okdir"))
     {
         return true;
+    } // Pattern kills hit every matching process on the box (browsers,
+      // servers, the harness itself) — always worth a glance first.
+    if matches!(
+        base,
+        "pkill" | "pkill9" | "killall" | "killall5" | "skill" | "pkillall"
+    ) {
+        return true;
+    }
+    if base == "kill" && toks.last().is_some_and(|t| *t == "-1") {
+        // `kill -9 -1` targets every process the user owns.
+        return true;
     }
     if base == "xargs"
         && toks[1..].iter().any(|t| {
@@ -260,6 +271,92 @@ pub(crate) fn segment_is_dangerous(seg: &str) -> bool {
 
     if interpreter_danger(seg) {
         return true;
+    }
+    false
+}
+
+/// True when the command tries to detach a process past the end of the
+/// call (`nohup`/`setsid`/`disown`/`coproc`, or a bare `&` background op
+/// without an in-call containment signal). Detached children cannot
+/// outlive the sandboxed call — the sandbox reaps the whole process group
+/// on exit — so such launches always die immediately and must go through
+/// the background-task system instead.
+pub(crate) fn wants_detach(args_str: &str) -> bool {
+    let raw = bash_command(args_str);
+    for seg in split_shell_segments(&raw.to_lowercase()) {
+        // Raw first: strip_wrappers eats nohup/setsid as plain wrappers.
+        for candidate in [seg.as_ref(), strip_wrappers(seg)] {
+            let first = candidate
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim_start_matches("./");
+            let base = first.rsplit('/').next().unwrap_or(first);
+            if matches!(base, "nohup" | "setsid" | "disown" | "coproc") {
+                return true;
+            }
+        }
+    }
+    has_background_op(&raw) && !has_containment(&raw.to_lowercase())
+}
+
+/// Lone `&` operator (not `&&`, redirects, `|&`, quotes, or escapes).
+fn has_background_op(cmd: &str) -> bool {
+    let b = cmd.as_bytes();
+    let mut i = 0;
+    let mut quote: Option<u8> = None;
+    while i < b.len() {
+        let c = b[i];
+        if c == b'\\' && i + 1 < b.len() {
+            i += 2;
+            continue;
+        }
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            i += 1;
+            continue;
+        }
+        if c == b'\'' || c == b'"' {
+            quote = Some(c);
+            i += 1;
+            continue;
+        }
+        if c == b'&' {
+            if i + 1 < b.len() && b[i + 1] == b'&' {
+                i += 2;
+                continue;
+            }
+            let next_gt = i + 1 < b.len() && b[i + 1] == b'>';
+            let mut j = i;
+            while j > 0 && (b[j - 1] == b' ' || b[j - 1] == b'\t') {
+                j -= 1;
+            }
+            let prev = if j > 0 { b[j - 1] } else { b' ' };
+            if next_gt || prev == b'>' || prev == b'<' || prev == b'|' {
+                i += 1;
+                continue;
+            }
+            return true;
+        }
+        i += 1;
+    }
+    false
+}
+
+/// Signals the background job's lifetime stays inside this call.
+fn has_containment(lower: &str) -> bool {
+    if lower.contains("$!") || lower.contains("kill %") {
+        return true;
+    }
+    for seg in split_shell_segments(lower) {
+        for tok in seg.split_whitespace() {
+            let t = tok.trim_matches(|c: char| c == ';' || c == '(' || c == ')');
+            if t == "wait" || t == "fg" {
+                return true;
+            }
+        }
     }
     false
 }

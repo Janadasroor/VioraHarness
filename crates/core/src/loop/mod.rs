@@ -1159,6 +1159,66 @@ mod tests {
     }
 
     #[test]
+    fn process_kill_routing() {
+        for cmd in [
+            "pkill -f http.server",
+            "pkill -9 chrome",
+            "sudo pkill x",
+            "/usr/bin/killall chrome",
+            "killall -9 -u jnd foo",
+            "X=1 pkill foo",
+            "kill -9 -1",
+            "kill -s KILL -1",
+        ] {
+            assert!(is_dangerous_bash(&bash_args(cmd)), "danger: {cmd}");
+        }
+        for cmd in [
+            "kill %1",
+            "kill -9 1234",
+            "kill -TERM 5678",
+            "kill -1 1234",
+            "kill -l",
+            "pgrep -f http.server",
+            "pgrep chrome",
+            "echo kill -9 -1",
+        ] {
+            assert!(!is_dangerous_bash(&bash_args(cmd)), "safe: {cmd}");
+        }
+    }
+
+    #[test]
+    fn detach_launch_steering() {
+        for cmd in [
+            "nohup python3 -m http.server 8111 &",
+            "nohup python3 -m http.server 8111 --directory . >/tmp/s.log 2>&1 &",
+            "DISPLAY=:10 nohup google-chrome --no-sandbox http://x/ &",
+            "setsid chrome --headless --screenshot=/tmp/s.png http://x/",
+            "server &",
+            "python3 -m http.server 8111 & sleep 1; curl -s localhost:8111",
+            "cmd1 & cmd2",
+            "disown %1",
+            "coproc foo { bar; }",
+        ] {
+            assert!(wants_detach(&bash_args(cmd)), "steer: {cmd}");
+        }
+        for cmd in [
+            "echo hi && echo bye",
+            "cmd 2>&1 | head -n 5",
+            "cmd &> /tmp/log",
+            "cmd |& tee /tmp/log",
+            "echo \"a&b\"",
+            "echo 'a&b'",
+            "make -j4 && make test",
+            "A & B & wait",
+            "server & pid=$!; sleep 1; curl -s localhost:8; kill $pid",
+            "cmd1; cmd2",
+            "grep -r foo . --include='*.rs'",
+        ] {
+            assert!(!wants_detach(&bash_args(cmd)), "run: {cmd}");
+        }
+    }
+
+    #[test]
     fn safe_gate_blocks_smuggled_execution() {
         for cmd in [
             "find . -delete",
