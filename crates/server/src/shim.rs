@@ -400,9 +400,10 @@ async fn forward_translated(
         .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
 }
 
-/// Fill `context_length`/`context_window` on each model entry so clients
-/// without their own catalog stop assuming a tiny default. Unknown models
-/// fall back to 128k, matching the main provider.
+/// Fill `context_length`/`context_window` on each model entry. Currently
+/// unused: kept for clients with lenient parsers, since strict OpenAI-schema
+/// clients reject unknown fields outright.
+#[allow(dead_code)]
 pub fn enrich_models_list(
     mut list: Value,
     sizes: &std::collections::HashMap<String, usize>,
@@ -423,40 +424,6 @@ pub fn enrich_models_list(
     list
 }
 
-async fn forward_models(state: &ShimState, parts: &axum::http::request::Parts) -> Response {
-    use vioraharness_core::provider::catalog::openrouter_context_cached;
-    let upstream = match state
-        .client
-        .get(format!("{UPSTREAM}/models"))
-        .headers(forward_headers(parts))
-        .send()
-        .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::warn!("shim models upstream failed: {e:#}");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
-    let status =
-        StatusCode::from_u16(upstream.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let bytes = match upstream.bytes().await {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::warn!("shim models read failed: {e:#}");
-            return StatusCode::BAD_GATEWAY.into_response();
-        }
-    };
-    // Never fail the listing because enrichment did: pass the raw upstream
-    // body through when it is not the expected JSON.
-    let list: Value = match serde_json::from_slice(&bytes) {
-        Ok(v) => v,
-        Err(_) => return (status, bytes.to_vec()).into_response(),
-    };
-    let sizes = openrouter_context_cached().await;
-    Json(enrich_models_list(list, &sizes)).into_response()
-}
-
 async fn forward(
     State(state): State<ShimState>,
     OriginalUri(uri): OriginalUri,
@@ -471,10 +438,12 @@ async fn forward(
         }))
         .into_response();
     }
-    if rel == "models" && req.method() == axum::http::Method::GET {
-        let (parts, _) = req.into_parts();
-        return forward_models(&state, &parts).await;
-    }
+    let ua = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("-");
+    tracing::info!("shim {} {} ua={}", req.method(), uri.path(), ua);
     let mut url = format!("{UPSTREAM}/{rel}");
     if let Some(q) = uri.query() {
         url.push('?');
