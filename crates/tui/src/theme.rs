@@ -410,6 +410,11 @@ impl Theme {
             .fg(Color::Green)
             .add_modifier(Modifier::BOLD)
     }
+    pub fn user_message() -> Style {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    }
     pub fn assistant_prefix() -> Style {
         let p = Self::palette();
         Style::default()
@@ -565,6 +570,17 @@ impl Theme {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_prompt_style_is_distinct() {
+        let s = Theme::user_message();
+        assert_eq!(s.fg, Some(Color::White));
+        assert!(
+            s.add_modifier.contains(Modifier::BOLD),
+            "prompts render bold"
+        );
+        assert_ne!(s, Theme::assistant_prefix(), "never the assistant look");
+    }
 
     #[test]
     fn busy_input_style_stays_visible() {

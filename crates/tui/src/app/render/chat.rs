@@ -345,6 +345,8 @@ impl App {
                     )
                 } else if is_error_msg {
                     Span::styled(display.clone(), crate::theme::Theme::error_message())
+                } else if m.role == "user" {
+                    Span::styled(display.clone(), Theme::user_message())
                 } else {
                     Span::raw(display.clone())
                 };

@@ -584,6 +584,40 @@ mod tests {
     }
 
     #[test]
+    fn user_prompt_renders_bold_white() {
+        use ratatui::{backend::TestBackend, Terminal};
+        let mut app = test_app();
+        app.messages.push(Msg::new("user", "do the thing"));
+        app.messages.push(Msg::new("assistant", "do the thing"));
+        let backend = TestBackend::new(60, 20);
+        let mut term = Terminal::new(backend).unwrap();
+        term.draw(|f| app.draw(f)).unwrap();
+        let buf = term.backend().buffer().clone();
+        let mut styled_rows = 0;
+        let mut plain_rows = 0;
+        for y in 0..buf.area.height {
+            let mut row_text = String::new();
+            let mut row_styled = String::new();
+            for x in 0..buf.area.width {
+                let cell = &buf[(x, y)];
+                row_text.push_str(cell.symbol());
+                if cell.fg == Color::White && cell.modifier.contains(Modifier::BOLD) {
+                    row_styled.push_str(cell.symbol());
+                }
+            }
+            if row_text.contains("do the thing") {
+                if row_styled.replace(' ', "").contains("dothething") {
+                    styled_rows += 1;
+                } else {
+                    plain_rows += 1;
+                }
+            }
+        }
+        assert_eq!(styled_rows, 1, "exactly the user prompt is bold white");
+        assert_eq!(plain_rows, 1, "assistant copy stays plain");
+    }
+
+    #[test]
     fn input_selection_paints_highlight() {
         use ratatui::{backend::TestBackend, Terminal};
         let mut app = test_app();
