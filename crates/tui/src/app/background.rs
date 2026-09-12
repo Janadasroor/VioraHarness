@@ -32,20 +32,10 @@ impl App {
                 self.wake_for_task(&done);
                 waked.push(done.id.clone());
             } else {
-                // Already waking/running: queue the follow-up behind the
-                // live turn instead of dropping it to a bare notice.
-                self.queued_prompts.push(QueuedPrompt {
-                    session_id: self.session_id.clone(),
-                    send: Self::task_wake_prompt(&done),
-                    image: None,
-                    slash: false,
-                    echo: false,
-                });
-                self.status = format!(
-                    "task {} finished — follow-up queued ({})",
-                    short_task_id(&done.id),
-                    self.queued_prompts.len()
-                );
+                // Turn running: notice only, never a queued wake prompt.
+                // Queued wakes pile up behind live turns and read like the
+                // chat talking to itself; the notice above is already
+                // persisted, so the next turn still sees the outcome.
                 waked.push(done.id.clone());
             }
         }
@@ -53,7 +43,6 @@ impl App {
     }
 
     /// Follow-up prompt for a finished background task (log tail included).
-    /// Pure constructor shared by immediate wakes and queued follow-ups.
     pub(crate) fn task_wake_prompt(done: &vioraharness_core::tools::tasks::BgTask) -> String {
         use vioraharness_core::tools::tasks::BgStatus;
         let tail = vioraharness_core::tools::tasks::read_task_log(&done.id).unwrap_or_default();
@@ -417,12 +406,11 @@ mod tests {
             assert!(waked.contains(probe), "every completion tracked: {waked:?}");
         }
         assert!(app.busy, "follow-up turn started");
-        // First completion starts the turn now, the rest queue behind it —
-        // none degrade to a bare notice.
-        assert_eq!(
-            app.queued_prompts.len() + 1,
-            waked.len(),
-            "exactly the live wake starts, the rest queue"
+        // First completion starts the turn now; the second arrives while
+        // busy, so it stays a persisted notice instead of queueing behind.
+        assert!(
+            app.queued_prompts.is_empty(),
+            "no wake queued behind the live turn"
         );
         assert!(
             app.messages
@@ -463,16 +451,10 @@ mod tests {
         );
         assert!(app.pending.is_none(), "no turn started while busy");
         assert!(
-            app.queued_prompts
+            !app.queued_prompts
                 .iter()
                 .any(|q| q.send.contains(&short_task_id(&t.id))),
-            "own follow-up queued behind live turn (siblings may queue too)"
-        );
-        assert!(
-            app.queued_prompts[0]
-                .send
-                .contains("[background task finished]"),
-            "queued payload is the wake prompt"
+            "no wake queued behind the live turn"
         );
         assert!(
             app.messages
