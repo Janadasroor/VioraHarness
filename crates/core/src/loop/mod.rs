@@ -20,6 +20,33 @@ pub struct AgentLoop {
     pub max_tokens: usize,
 }
 
+/// Spill files (`vioraharness_tool_*.json`) accumulate in `dir` across turns
+/// and sessions; keep only the newest `keep` so stale traces cannot pile up.
+pub(crate) fn prune_spill_files(dir: &std::path::Path, keep: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut spills: Vec<_> = rd
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("vioraharness_tool_")
+        })
+        .collect();
+    if spills.len() <= keep {
+        return;
+    }
+    spills.sort_by_key(|e| {
+        e.metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+    });
+    for stale in spills.iter().take(spills.len() - keep) {
+        let _ = std::fs::remove_file(stale.path());
+    }
+}
+
 impl Default for AgentLoop {
     fn default() -> Self {
         Self::new()
@@ -784,6 +811,7 @@ impl AgentLoop {
                         &id[..8.min(id.len())]
                     );
                     let _ = std::fs::write(&tmp_path, &result_str);
+                    prune_spill_files(std::path::Path::new("/tmp"), 20);
                     result_str = crate::tools::viora::truncate_to_bytes(&result_str, 8000);
                     result_str.push_str(&format!(
                         "...(truncated, full {} chars saved to {} — press V in TUI / cat {} or /output)",
@@ -927,6 +955,28 @@ mod tests {
         ));
 
         assert!(!is_unproductive_call("read", &json!({"ok": true})));
+    }
+
+    #[test]
+    fn spill_prune_keeps_newest() {
+        let dir = std::env::temp_dir().join(format!("vh-spill-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for i in 0..5 {
+            std::fs::write(dir.join(format!("vioraharness_tool_x_{i}.json")), "{}").unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::fs::write(dir.join("unrelated.txt"), "keep").unwrap();
+        prune_spill_files(&dir, 2);
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(left.len(), 3, "2 newest spills + unrelated: {left:?}");
+        assert!(left.contains(&"unrelated.txt".to_string()));
+        assert!(left.contains(&"vioraharness_tool_x_4.json".to_string()));
+        assert!(left.contains(&"vioraharness_tool_x_3.json".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn assistant_with_calls(id: &str) -> ChatMessage {
