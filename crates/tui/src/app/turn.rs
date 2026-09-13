@@ -37,6 +37,50 @@ impl App {
         Ok(())
     }
 
+    /// `$` instant prompt: bypasses the queue and lands in the live turn at
+    /// its next turn boundary. Echoed immediately (unlike queued prompts).
+    /// No slash dispatch after `$` — the remainder is always prompt text.
+    /// Falls back to the normal queue when no live turn for this session can
+    /// take it (turn just ended, session switched) or when an image is
+    /// attached (injection is text-only in v1).
+    pub(crate) fn submit_instant(&mut self, prompt: String) {
+        let stripped = prompt
+            .strip_prefix('$')
+            .unwrap_or(&prompt)
+            .trim()
+            .to_string();
+        if stripped.is_empty() {
+            self.status = "empty $ prompt — ignored".into();
+            self.input.text.clear();
+            self.input.cursor = 0;
+            return;
+        }
+        let live = match (&self.instant_injector, &self.turn_session) {
+            (Some(inj), Some(ts)) if ts == &self.session_id && self.pending_image.is_none() => {
+                Some(inj.clone())
+            }
+            _ => None,
+        };
+        let Some(inj) = live else {
+            if self.pending_image.is_some() {
+                self.queue_prompt(stripped);
+                self.status = "image can't ride ⚡ — queued for next turn".into();
+            } else {
+                self.queue_prompt(stripped);
+            }
+            return;
+        };
+        let history_text = stripped.clone();
+        let send = expand_paste_chips(&stripped, &self.pending_texts);
+        self.pending_texts.clear();
+        self.messages.push(Msg::new("user", send.clone()));
+        self.input.push_history(history_text);
+        self.input.text.clear();
+        self.input.cursor = 0;
+        inj.push(send);
+        self.status = "⚡ sent to current turn".into();
+    }
+
     pub(crate) fn start_turn(&mut self, send: String, image: Option<(String, String)>) {
         self.scroll = 0;
         self.selection = None;
@@ -53,9 +97,13 @@ impl App {
         let session_id = self.session_id.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(128);
         self.stream_rx = Some(rx);
+        // The loop is built here (not inside the task) so its `$`
+        // instant-prompt handle can be shared with the UI while it runs.
+        let loop_ = vioraharness_core::loop_mod::AgentLoop::new();
+        self.instant_injector = Some(loop_.injector.clone());
+        self.turn_session = Some(session_id.clone());
         let handle = tokio::spawn(async move {
             std::env::set_var("VIORAHARNESS_TUI", "1");
-            let loop_ = vioraharness_core::loop_mod::AgentLoop::new();
             let res = if let Some((mime, b64)) = image {
                 loop_
                     .run_streaming_with_image(

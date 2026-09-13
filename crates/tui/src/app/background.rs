@@ -175,6 +175,33 @@ impl App {
         };
     }
 
+    /// Move unpicked `$` instant prompts to the queue head (no re-echo —
+    /// they already echoed when typed). Called when a turn ends or is
+    /// cancelled so displayed prompts are never orphaned. Returns how many
+    /// were promoted.
+    pub(crate) fn promote_instant_leftovers(&mut self) -> usize {
+        let Some(inj) = self.instant_injector.take() else {
+            return 0;
+        };
+        self.turn_session = None;
+        let leftovers = inj.drain();
+        let n = leftovers.len();
+        // Reverse-insert so the oldest leftover ends up at the head.
+        for send in leftovers.into_iter().rev() {
+            self.queued_prompts.insert(
+                0,
+                QueuedPrompt {
+                    session_id: self.session_id.clone(),
+                    send,
+                    image: None,
+                    slash: false,
+                    echo: false,
+                },
+            );
+        }
+        n
+    }
+
     /// Send queued prompts in order, but only once the agent is fully
     /// idle — never injected into a running turn. Each prompt is echoed
     /// into chat as its turn starts (never at queue time), so display
@@ -1233,5 +1260,179 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(&dir);
         restore_db_env(prev, &db);
+    }
+
+    fn live_turn_app() -> App {
+        // Simulate a running turn: busy with a live injector, no real task.
+        let mut app = test_app();
+        app.busy = true;
+        let inj = vioraharness_core::loop_mod::Injector::default();
+        app.turn_session = Some(app.session_id.clone());
+        app.instant_injector = Some(inj);
+        app
+    }
+
+    #[tokio::test]
+    async fn instant_prompt_echoes_and_injects_while_busy() {
+        let mut app = live_turn_app();
+        app.input.text = "$stop that".into();
+        app.input.cursor = 10;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert_eq!(app.input.text, "", "input cleared");
+        assert!(app.queued_prompts.is_empty(), "queue bypassed");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "stop that"),
+            "echoed immediately, sigil stripped"
+        );
+        assert!(
+            !app.messages.iter().any(|m| m.content.contains('$')),
+            "no $ leaks into chat"
+        );
+        let inj = app.instant_injector.as_ref().expect("turn still live");
+        assert_eq!(inj.drain(), vec!["stop that".to_string()]);
+        assert!(app.status.contains('⚡'), "status: {}", app.status);
+    }
+
+    #[tokio::test]
+    async fn instant_falls_back_to_queue_without_live_turn() {
+        let mut app = test_app();
+        app.busy = true; // busy, but the turn handle is already gone
+        app.input.text = "$later please".into();
+        app.input.cursor = 13;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert_eq!(app.queued_prompts.len(), 1);
+        assert_eq!(app.queued_prompts[0].send, "later please");
+        assert!(app.queued_prompts[0].echo, "normal echo at turn start");
+        assert!(
+            !app.messages.iter().any(|m| m.role == "user"),
+            "no immediate echo on fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn instant_session_mismatch_queues() {
+        let mut app = live_turn_app();
+        app.turn_session = Some("other-session".into());
+        app.input.text = "$not yours".into();
+        app.input.cursor = 10;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert_eq!(app.queued_prompts.len(), 1, "queued, not injected");
+        assert_eq!(app.queued_prompts[0].send, "not yours");
+        assert!(
+            app.instant_injector
+                .as_ref()
+                .map(|i| i.is_empty())
+                .unwrap_or(false),
+            "live turn untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn instant_slash_stays_literal() {
+        let mut app = live_turn_app();
+        app.input.text = "$/model x".into();
+        app.input.cursor = 9;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        let inj = app.instant_injector.as_ref().expect("turn still live");
+        assert_eq!(inj.drain(), vec!["/model x".to_string()]);
+        assert_eq!(app.popup, Popup::None, "no slash dispatched");
+    }
+
+    #[tokio::test]
+    async fn instant_empty_ignored() {
+        let mut app = live_turn_app();
+        app.input.text = "$  ".into();
+        app.input.cursor = 3;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert!(app.queued_prompts.is_empty());
+        assert!(app
+            .instant_injector
+            .as_ref()
+            .map(|i| i.is_empty())
+            .unwrap_or(false));
+        assert!(app.status.contains("ignored"), "status: {}", app.status);
+    }
+
+    #[tokio::test]
+    async fn instant_idle_submits_normally() {
+        let (db, prev, _env_guard) = with_temp_db("instant-idle");
+        let mut app = test_app();
+        app.input.text = "$go fast".into();
+        app.input.cursor = 8;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert!(app.busy, "turn started");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.role == "user" && m.content == "go fast"),
+            "stripped and echoed"
+        );
+        assert!(app.instant_injector.is_some(), "live handle stashed");
+        assert_eq!(app.turn_session.as_deref(), Some(app.session_id.as_str()));
+        if let Some(h) = app.pending.take() {
+            h.abort();
+        }
+        app.busy = false;
+        restore_db_env(prev, &db);
+    }
+
+    #[test]
+    fn promote_instant_leftovers_heads_queue_without_echo() {
+        let mut app = live_turn_app();
+        let inj = app.instant_injector.as_ref().unwrap().clone();
+        inj.push("i1".into());
+        inj.push("i2".into());
+        app.queued_prompts.push(QueuedPrompt {
+            session_id: app.session_id.clone(),
+            send: "normal".into(),
+            image: None,
+            slash: false,
+            echo: true,
+        });
+        let n = app.promote_instant_leftovers();
+        assert_eq!(n, 2);
+        assert!(app.instant_injector.is_none(), "handle released");
+        assert!(app.turn_session.is_none());
+        let sends: Vec<_> = app.queued_prompts.iter().map(|q| q.send.as_str()).collect();
+        assert_eq!(sends, vec!["i1", "i2", "normal"], "oldest first: {sends:?}");
+        assert!(
+            app.queued_prompts[0].echo == false && app.queued_prompts[1].echo == false,
+            "no re-echo for already-displayed prompts"
+        );
+        assert!(app.queued_prompts[2].echo, "normal keeps its echo");
+    }
+
+    #[tokio::test]
+    async fn esc_cancel_promotes_instant_leftovers() {
+        let mut app = live_turn_app();
+        app.instant_injector.as_ref().unwrap().push("urgent".into());
+        app.queued_prompts.push(QueuedPrompt {
+            session_id: app.session_id.clone(),
+            send: "doomed".into(),
+            image: None,
+            slash: false,
+            echo: true,
+        });
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(!app.busy, "turn cancelled");
+        assert_eq!(app.queued_prompts.len(), 1, "normal dropped, ⚡ kept");
+        assert_eq!(app.queued_prompts[0].send, "urgent");
+        assert!(!app.queued_prompts[0].echo, "already echoed");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("kept 1 ⚡")),
+            "kept notice shown"
+        );
+    }
+
+    #[test]
+    fn footer_shows_instant_count() {
+        let mut app = live_turn_app();
+        app.instant_injector.as_ref().unwrap().push("a".into());
+        app.instant_injector.as_ref().unwrap().push("b".into());
+        let text = render_text(&mut app, 100, 30);
+        let footer = text.lines().last().unwrap_or("").to_string();
+        assert!(footer.contains("»2 instant"), "instant count: {footer:?}");
     }
 }

@@ -167,7 +167,7 @@ impl App {
         let model_short = self.model.split('/').next_back().unwrap_or(&self.model);
         let title = if self.busy {
             format!(
-                " Input — {} [{}] (busy — type ahead, Enter queues • Esc cancels turn) ",
+                " Input — {} [{}] (busy — Enter queues • $… ⚡ current turn • Esc cancels) ",
                 model_short,
                 self.mode.to_uppercase()
             )
@@ -250,6 +250,11 @@ impl App {
             .count();
         let total = tasks.len();
         let queued = self.queued_prompts.len();
+        let instant = self
+            .instant_injector
+            .as_ref()
+            .map(|inj| inj.len())
+            .unwrap_or(0);
         let mut suffix: Vec<Span> = Vec::new();
         if total > 0 {
             suffix.push(Span::styled("  •  ", Style::default().fg(Color::DarkGray)));
@@ -285,6 +290,19 @@ impl App {
                     "▸1 queued".to_string()
                 } else {
                     format!("▸{queued} queued")
+                },
+                Style::default().fg(Color::Cyan),
+            ));
+        }
+        if instant > 0 {
+            // `»` (not ⚡): footer width math counts chars, and ⚡ renders
+            // double-width on some terminals.
+            suffix.push(Span::styled("  •  ", Style::default().fg(Color::DarkGray)));
+            suffix.push(Span::styled(
+                if instant == 1 {
+                    "»1 instant".to_string()
+                } else {
+                    format!("»{instant} instant")
                 },
                 Style::default().fg(Color::Cyan),
             ));

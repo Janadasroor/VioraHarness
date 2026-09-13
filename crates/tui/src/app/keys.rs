@@ -183,6 +183,19 @@ impl App {
                             ),
                         ));
                     }
+                    // `$` instant prompts already echoed into chat: never
+                    // orphan them — promote leftovers to the queue head
+                    // (no re-echo) instead of dropping.
+                    let kept = self.promote_instant_leftovers();
+                    if kept > 0 {
+                        self.messages.push(Msg::new(
+                            "system",
+                            format!(
+                                "kept {kept} ⚡ prompt{} for next turn (turn cancelled)",
+                                if kept == 1 { "" } else { "s" }
+                            ),
+                        ));
+                    }
                 } else {
                     self.popup = Popup::None;
                 }
@@ -224,6 +237,27 @@ impl App {
                 let prompt = self.input.text.trim().to_string();
                 if prompt.is_empty() {
                     return Ok(());
+                }
+
+                // `$` instant prompt: bypasses the queue into the live turn.
+                // No slash dispatch after `$` — the remainder is prompt text.
+                if prompt.starts_with('$') {
+                    if self.busy {
+                        self.submit_instant(prompt);
+                        return Ok(());
+                    }
+                    let stripped = prompt
+                        .strip_prefix('$')
+                        .unwrap_or(&prompt)
+                        .trim()
+                        .to_string();
+                    if stripped.is_empty() {
+                        self.status = "empty $ prompt — ignored".into();
+                        self.input.text.clear();
+                        self.input.cursor = 0;
+                        return Ok(());
+                    }
+                    return self.submit_text(stripped);
                 }
 
                 if prompt.starts_with('/') && Self::is_known_slash(&prompt) {

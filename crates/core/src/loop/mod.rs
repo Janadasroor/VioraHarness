@@ -6,9 +6,11 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 mod history;
+mod inject;
 mod policy;
 mod safety;
 pub(crate) use history::*;
+pub use inject::Injector;
 pub use policy::config_candidates;
 pub(crate) use policy::*;
 pub(crate) use safety::*;
@@ -18,6 +20,10 @@ pub struct AgentLoop {
     pub registry: ToolRegistry,
     pub rules: Vec<Rule>,
     pub max_tokens: usize,
+    /// Inbound `$` instant prompts. The TUI clones this before spawning a
+    /// turn and pushes while it runs; `run_inner` drains it at turn
+    /// boundaries. Unused (always empty) for server-spawned loops.
+    pub injector: Injector,
 }
 
 /// Spill files (`vioraharness_tool_*.json`) accumulate in `dir` across turns
@@ -60,6 +66,7 @@ impl AgentLoop {
             registry: ToolRegistry::new(),
             rules,
             max_tokens: 128_000,
+            injector: Injector::default(),
         }
     }
 
@@ -68,6 +75,7 @@ impl AgentLoop {
             registry,
             rules: load_rules_from_config(),
             max_tokens: 128_000,
+            injector: Injector::default(),
         }
     }
 
@@ -321,6 +329,24 @@ impl AgentLoop {
                 return Ok(summary);
             }
 
+            // `$` instant prompts injected while the turn runs: pick them up
+            // after the previous thinking/tool call, before the next model
+            // call. Backlog concatenates into one user message.
+            let injected = self.injector.drain();
+            if !injected.is_empty() {
+                let combined = injected.join("\n");
+                tracing::info!(
+                    "instant prompt injected mid-turn ({} queued)",
+                    injected.len()
+                );
+                messages.push(ChatMessage::text("user", combined.clone()));
+                if let Some(ref s) = store {
+                    let _ = s.append_message(&session_id, "user", &combined);
+                }
+                empty_nudges = 0;
+                unproductive_streak = 0;
+            }
+
             let total_chars: usize = messages.iter().map(|m| m.content_len()).sum();
             let est_tokens = total_chars / 4;
 
@@ -520,6 +546,23 @@ impl AgentLoop {
             };
 
             if tool_calls.is_empty() {
+                // The model wants to finish, but `$` instant prompts arrived
+                // during this final stream: keep going instead of returning.
+                let injected = self.injector.drain();
+                if !injected.is_empty() {
+                    let combined = injected.join("\n");
+                    tracing::info!(
+                        "instant prompt injected at turn end ({} queued)",
+                        injected.len()
+                    );
+                    messages.push(ChatMessage::text("user", combined.clone()));
+                    if let Some(ref s) = store {
+                        let _ = s.append_message(&session_id, "user", &combined);
+                    }
+                    empty_nudges = 0;
+                    unproductive_streak = 0;
+                    continue;
+                }
                 if let Some(ref s) = store {
                     let _ = s.append_message_full(
                         &session_id,
@@ -997,6 +1040,20 @@ mod tests {
         let mut m = ChatMessage::text("tool", "{}");
         m.tool_call_id = id.map(|s| s.into());
         m
+    }
+
+    #[test]
+    fn sanitize_keeps_injected_user_after_tool_result() {
+        // Shape an `$` instant prompt produces mid-turn: assistant tool
+        // calls → tool result → injected user message.
+        let mut msgs = vec![
+            ChatMessage::text("user", "hi"),
+            assistant_with_calls("call-1"),
+            tool_msg(Some("call-1")),
+            ChatMessage::text("user", "instant: stop that"),
+        ];
+        sanitize_tool_contiguity(&mut msgs);
+        assert_eq!(msgs.len(), 4, "injected user msg survives");
     }
 
     #[test]

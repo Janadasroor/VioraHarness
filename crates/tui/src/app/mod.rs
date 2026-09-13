@@ -123,6 +123,13 @@ pub struct App {
 
     pub(crate) queued_prompts: Vec<QueuedPrompt>,
 
+    /// `$` instant-prompt handle for the live turn (cloned out of its
+    /// `AgentLoop` in `start_turn`). `None` when no turn is running.
+    pub(crate) instant_injector: Option<vioraharness_core::loop_mod::Injector>,
+    /// Session the live turn belongs to. `$` falls back to the normal queue
+    /// when this differs from the current session.
+    pub(crate) turn_session: Option<String>,
+
     pub(crate) last_tool_output: Option<(String, String, String, bool)>,
     pub(crate) tool_output_scroll: usize,
 
@@ -1332,6 +1339,8 @@ impl App {
             ctx_freed_tokens: 0,
             wake_on_tasks,
             queued_prompts: Vec::new(),
+            instant_injector: None,
+            turn_session: None,
             last_tool_output: None,
             tool_output_scroll: 0,
             chat_total_lines: 0,
@@ -1736,6 +1745,12 @@ impl App {
                     }
                 }
 
+                if !self.busy {
+                    // A finished turn may leave `$` prompts the loop never
+                    // picked up (typed during the final stream): head them
+                    // onto the queue before the drain.
+                    self.promote_instant_leftovers();
+                }
                 self.drain_queue();
             }
 
