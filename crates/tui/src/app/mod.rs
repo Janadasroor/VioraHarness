@@ -140,6 +140,11 @@ pub struct App {
     pub(crate) dragging: bool,
     pub(crate) input_drag: bool,
     pub(crate) copy_pending: bool,
+    /// Finished async clipboard copy: status line to show. Polled with
+    /// try_recv — the helper thread owns any X11/subprocess stall.
+    pub(crate) copy_rx: Option<std::sync::mpsc::Receiver<String>>,
+    /// Finished async clipboard paste probe. Same non-blocking contract.
+    pub(crate) paste_rx: Option<std::sync::mpsc::Receiver<PasteDone>>,
 
     pub(crate) chat_area: Rect,
     pub(crate) input_area: Rect,
@@ -1368,6 +1373,8 @@ impl App {
             dragging: false,
             input_drag: false,
             copy_pending: false,
+            copy_rx: None,
+            paste_rx: None,
             chat_area: Rect::default(),
             input_area: Rect::default(),
             view_start: 0,
@@ -1384,6 +1391,22 @@ impl App {
             let _ = tx.send(live).await;
         });
         self.status = "fetching models…".into();
+        // Blocking `event::read()` lives on its own thread: a pathological
+        // escape sequence can park the reader, but rendering + provider/task
+        // updates keep flowing on the heartbeat below — the screen never
+        // needs a keypress to catch up. The thread dies with the process
+        // on TUI exit (no join: it may sit parked in read).
+        let (input_tx, input_rx) = std::sync::mpsc::channel::<Event>();
+        std::thread::Builder::new()
+            .name("viora-input".into())
+            .spawn(move || {
+                while let Ok(ev) = event::read() {
+                    if input_tx.send(ev).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|e| anyhow::anyhow!("spawn input reader: {e}"))?;
         let mut terminal = ratatui::init();
 
         if let Err(e) = crossterm::execute!(std::io::stdout(), crossterm::event::EnableMouseCapture)
@@ -1391,7 +1414,7 @@ impl App {
             tracing::warn!("mouse capture unavailable: {e}");
         }
         let sid = self.session_id.clone();
-        let res = self.event_loop(&mut terminal).await;
+        let res = self.event_loop(&mut terminal, &input_rx).await;
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
         match res {
@@ -1403,9 +1426,14 @@ impl App {
         }
     }
 
-    async fn event_loop(&mut self, terminal: &mut ratatui::DefaultTerminal) -> anyhow::Result<()> {
+    async fn event_loop(
+        &mut self,
+        terminal: &mut ratatui::DefaultTerminal,
+        input_rx: &std::sync::mpsc::Receiver<Event>,
+    ) -> anyhow::Result<()> {
+        let mut last_draw = std::time::Instant::now();
+        let mut dirty = true;
         loop {
-            terminal.draw(|f| self.draw(f))?;
             if self.should_quit {
                 break;
             }
@@ -1413,6 +1441,7 @@ impl App {
             if let Some(rx) = &mut self.model_fetch_rx {
                 match rx.try_recv() {
                     Ok((models, ctx_map)) => {
+                        dirty = true;
                         let n = models.len();
                         let has_gem = models.iter().any(|m| m.contains("gemini"));
                         let sample: Vec<String> = models
@@ -1456,12 +1485,16 @@ impl App {
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         self.model_fetch_rx = None;
                         self.status = "ready".into();
+                        dirty = true;
                         tracing::warn!("model_fetch_rx disconnected");
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Empty) => {}
                 }
             }
 
+            // Fingerprint: task/compact/queue polling mutates messages and
+            // status through several paths — any change redraws this frame.
+            let fp_before = (self.messages.len(), self.status.clone());
             self.poll_compact();
 
             self.poll_task_completions();
@@ -1469,6 +1502,7 @@ impl App {
             if let Some(rx) = &mut self.perm_rx {
                 match rx.try_recv() {
                     Ok(ask) => {
+                        dirty = true;
                         self.pending_perm = Some(ask);
                         self.popup = Popup::PermissionAsk;
                         self.perm_cursor = 0;
@@ -1484,6 +1518,7 @@ impl App {
             if let Some(rx) = &mut self.q_rx {
                 match rx.try_recv() {
                     Ok(q) => {
+                        dirty = true;
                         if let Some(old) = self.pending_q.take() {
                             let _ = old
                                 .tx
@@ -1508,7 +1543,9 @@ impl App {
             if let Some(rx) = &mut self.stream_rx {
                 let td_map = self.tool_display.clone();
                 let td_default = self.tool_display_default.clone();
+                let mut stream_dirty = false;
                 while let Ok(ev) = rx.try_recv() {
+                    stream_dirty = true;
                     match ev {
                         vioraharness_core::provider::ProviderEvent::TextDelta(t) => {
                             self.streaming_buf.push_str(&t);
@@ -1734,6 +1771,9 @@ impl App {
                         _ => {}
                     }
                 }
+                if stream_dirty {
+                    dirty = true;
+                }
             }
 
             if self.busy {
@@ -1773,13 +1813,20 @@ impl App {
                 }
                 self.drain_queue();
             }
+            if (self.messages.len(), self.status.clone()) != fp_before {
+                dirty = true;
+            }
 
-            if event::poll(Duration::from_millis(80))? {
-                match event::read()? {
-                    Event::Key(k) => {
+            // Input arrives via the reader thread — drain everything pending
+            // so bursts (pastes, mouse drags) collapse into one redraw
+            // instead of one expensive frame per event.
+            loop {
+                match input_rx.try_recv() {
+                    Ok(Event::Key(k)) => {
                         if k.kind != KeyEventKind::Press {
                             continue;
                         }
+                        dirty = true;
                         if k.code == KeyCode::Char('c')
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                             && k.modifiers.contains(KeyModifiers::ALT)
@@ -1994,15 +2041,9 @@ impl App {
                                 && k.modifiers.contains(KeyModifiers::ALT)
                                 && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V'))
                             {
-                                if let Some(txt) = clipboard_paste_text() {
-                                    if !txt.is_empty() {
-                                        self.insert_pasted_text(&txt);
-                                    } else {
-                                        self.status = "clipboard empty".into();
-                                    }
-                                } else {
-                                    self.status = "clipboard empty".into();
-                                }
+                                // Probed off-thread (arboard/X11 can stall);
+                                // completion inserts via poll_clipboard_results.
+                                self.begin_clipboard_paste(true);
                                 continue;
                             }
                             if k.modifiers.contains(KeyModifiers::CONTROL) {
@@ -2038,40 +2079,11 @@ impl App {
                                         continue;
                                     }
                                     KeyCode::Char('v') | KeyCode::Char('V') => {
-                                        let mut pasted = false;
-                                        if let Some((b64, w, h)) = clipboard_paste_image_base64() {
-                                            let label = format!("{w}×{h}");
-                                            self.attach_pasted_image(b64, "image/png", label);
-                                            pasted = true;
-                                        }
-                                        if let Some(txt) = clipboard_paste_text() {
-                                            if !txt.is_empty() {
-                                                if pasted {
-                                                    if detect_image_path(&txt).is_none() {
-                                                        self.insert_pasted_text(&txt);
-                                                    }
-                                                } else if let Some(path) = detect_image_path(&txt) {
-                                                    match load_image_file(&path) {
-                                                        Ok((b64, mime, label)) => {
-                                                            self.attach_pasted_image(
-                                                                b64, mime, label,
-                                                            );
-                                                        }
-                                                        Err(e) => {
-                                                            self.status = e;
-                                                            self.insert_pasted_text(&txt);
-                                                        }
-                                                    }
-                                                    pasted = true;
-                                                } else {
-                                                    self.insert_pasted_text(&txt);
-                                                    pasted = true;
-                                                }
-                                            }
-                                        }
-                                        if pasted {
-                                            continue;
-                                        }
+                                        // Probed off-thread (arboard/X11 can
+                                        // stall); completion inserts via
+                                        // poll_clipboard_results.
+                                        self.begin_clipboard_paste(false);
+                                        continue;
                                     }
                                     _ => {}
                                 }
@@ -2105,20 +2117,59 @@ impl App {
                         }
                         self.handle_key_event(k).await?;
                     }
-                    Event::Resize(_, _) => {
-                        continue;
+                    Ok(Event::Resize(_, _)) => {
+                        dirty = true;
                     }
-                    Event::Mouse(m) => {
+                    Ok(Event::Mouse(m)) => {
                         self.handle_mouse(m);
+                        dirty = true;
                     }
-                    _ => {}
+                    Ok(_) => {}
+                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        // Reader gone (terminal lost): nothing left to drive us.
+                        self.should_quit = true;
+                        break;
+                    }
                 }
-            } else if self.busy {
-                self.tick = self.tick.wrapping_add(1);
+            }
+            if self.poll_clipboard_results() {
+                dirty = true;
+            }
+            // Heartbeat: spinner + tool timers animate while busy; popups
+            // and running-task footers stay live; the idle backstop bounds
+            // any missed-dirty staleness without needing a keypress.
+            let active = self.busy || self.popup != Popup::None;
+            let interval = if active {
+                Duration::from_millis(100)
+            } else if has_running_tasks() {
+                Duration::from_millis(500)
+            } else {
+                Duration::from_millis(2000)
+            };
+            if dirty || last_draw.elapsed() >= interval {
+                if self.busy {
+                    self.tick = self.tick.wrapping_add(1);
+                }
+                terminal.draw(|f| self.draw(f))?;
+                last_draw = std::time::Instant::now();
+                dirty = false;
+            } else {
+                // Fully idle: sip CPU instead of spinning try_recv.
+                // Worst-case input/stream latency +10ms.
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
         Ok(())
     }
+}
+
+/// Any live background task? Drives the idle heartbeat so /tasks footers
+/// stay fresh while work runs, without redrawing a static screen hot.
+fn has_running_tasks() -> bool {
+    vioraharness_core::tools::tasks::list_tasks()
+        .iter()
+        .any(|t| t.status == vioraharness_core::tools::tasks::BgStatus::Running)
 }
 
 #[cfg(test)]

@@ -853,16 +853,22 @@ impl App {
                         self.selection = None;
                         self.status = "nothing to copy".into();
                     } else {
-                        match clipboard_copy_text(&text) {
-                            Ok((n, via)) => {
-                                self.status = format!(
+                        // Clipboard backends (arboard/X11, xclip…) can
+                        // stall for seconds — never park a frame on them.
+                        // Copy on a helper thread; poll_clipboard_results
+                        // reports the outcome on a later frame.
+                        let (tx, rx) = std::sync::mpsc::channel();
+                        self.copy_rx = Some(rx);
+                        std::thread::spawn(move || {
+                            let status = match clipboard_copy_text(&text) {
+                                Ok((n, via)) => format!(
                                     "copied {n} chars via {via} — selection kept (Esc clears)"
-                                );
-                            }
-                            Err(e) => {
-                                self.status = format!("copy failed ({e}) — selection kept");
-                            }
-                        }
+                                ),
+                                Err(e) => format!("copy failed ({e}) — selection kept"),
+                            };
+                            let _ = tx.send(status);
+                        });
+                        self.status = "copying…".into();
                     }
                 } else {
                     self.selection = None;

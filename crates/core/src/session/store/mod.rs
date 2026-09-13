@@ -139,6 +139,15 @@ impl SessionStore {
                 [],
             );
 
+            // 004: task-wake prompts were persisted as role=user,
+            // impersonating the user in history. Re-tag rows only the
+            // harness itself produced (task_wake_prompt is the sole
+            // writer of this prefix). Idempotent.
+            let _ = conn.execute(
+                "UPDATE messages SET role = 'system' WHERE role = 'user' AND content LIKE '[background task finished] %'",
+                [],
+            );
+
             let _ = conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;");
         }
 
@@ -400,6 +409,38 @@ mod tests {
         let det = s.get_messages_detailed("sess").unwrap();
         assert_eq!(det[1].reasoning.as_deref(), Some("r"));
         assert_eq!(det[1].model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn migrate_004_retags_wake_prompts_as_system() {
+        let db = std::env::temp_dir().join(format!("vh_mig004_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db);
+        let path = db.to_string_lossy().to_string();
+        {
+            let s = SessionStore::new(&path).expect("open");
+            s.create_session("sess", "m", None).unwrap();
+            // Legacy rows, as run_inner stored them before the fix.
+            s.append_message(
+                "sess",
+                "user",
+                "[background task finished] abc123 (`sleep 1`) done (exit 0).\nLog tail:\n...",
+            )
+            .unwrap();
+            s.append_message("sess", "user", "real prompt mentioning background work")
+                .unwrap();
+            s.append_message("sess", "assistant", "on it").unwrap();
+        }
+        // Reopen runs migrations.
+        let s = SessionStore::new(&path).expect("reopen");
+        let msgs = s.get_messages("sess").unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[0].1, "system", "wake prompt re-tagged");
+        assert_eq!(msgs[1].1, "user", "real user prompt untouched");
+        assert_eq!(msgs[2].1, "assistant");
+        let _ = std::fs::remove_file(&db);
+        for ext in ["wal", "shm", "journal"] {
+            let _ = std::fs::remove_file(db.with_extension(format!("db-{ext}")));
+        }
     }
 
     #[test]

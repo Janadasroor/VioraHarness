@@ -33,7 +33,11 @@ impl App {
         self.input.push_history(history_text);
         self.input.text.clear();
         self.input.cursor = 0;
-        self.start_turn(send, pending_img.map(|img| (img.mime.to_string(), img.b64)));
+        self.start_turn(
+            send,
+            pending_img.map(|img| (img.mime.to_string(), img.b64)),
+            "user",
+        );
         Ok(())
     }
 
@@ -81,7 +85,12 @@ impl App {
         self.status = "⚡ sent to current turn".into();
     }
 
-    pub(crate) fn start_turn(&mut self, send: String, image: Option<(String, String)>) {
+    pub(crate) fn start_turn(
+        &mut self,
+        send: String,
+        image: Option<(String, String)>,
+        prompt_role: &'static str,
+    ) {
         self.scroll = 0;
         self.selection = None;
         self.dragging = false;
@@ -104,19 +113,27 @@ impl App {
         self.turn_session = Some(session_id.clone());
         let handle = tokio::spawn(async move {
             std::env::set_var("VIORAHARNESS_TUI", "1");
-            let res = if let Some((mime, b64)) = image {
-                loop_
-                    .run_streaming_with_image(
-                        &send,
-                        &model,
-                        Some(session_id),
-                        tx,
-                        Some((mime, b64)),
-                    )
-                    .await
+            let res = if prompt_role == "user" {
+                if let Some((mime, b64)) = image {
+                    loop_
+                        .run_streaming_with_image(
+                            &send,
+                            &model,
+                            Some(session_id),
+                            tx,
+                            Some((mime, b64)),
+                        )
+                        .await
+                } else {
+                    loop_
+                        .run_streaming(&send, &model, Some(session_id), tx)
+                        .await
+                }
             } else {
+                // System-originated turn (task wake): stored/sent as
+                // system, never as the user's own words.
                 loop_
-                    .run_streaming(&send, &model, Some(session_id), tx)
+                    .run_streaming_system(&send, &model, Some(session_id), tx)
                     .await
             };
             std::env::remove_var("VIORAHARNESS_TUI");

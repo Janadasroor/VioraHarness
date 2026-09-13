@@ -1,4 +1,108 @@
+use super::App;
 use base64::Engine as _;
+
+/// What the paste helper thread found (see `App::begin_clipboard_paste`).
+pub(crate) struct PasteDone {
+    pub img: Option<(String, u32, u32)>,
+    pub text: Option<String>,
+}
+
+impl App {
+    /// Probe the clipboard off-thread: arboard/X11 connects and helper
+    /// binaries can stall for seconds, and the UI loop must never park
+    /// on them. Completion lands via `poll_clipboard_results`, which
+    /// applies the same insert/attach rules the sync path used.
+    pub(crate) fn begin_clipboard_paste(&mut self, text_only: bool) {
+        // Newest request wins; a superseded thread's send fails silently.
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.paste_rx = Some(rx);
+        std::thread::spawn(move || {
+            let done = if text_only {
+                PasteDone {
+                    img: None,
+                    text: clipboard_paste_text(),
+                }
+            } else {
+                PasteDone {
+                    img: clipboard_paste_image_base64(),
+                    text: clipboard_paste_text(),
+                }
+            };
+            let _ = tx.send(done);
+        });
+        self.status = "reading clipboard…".into();
+    }
+
+    /// Apply finished copy/paste helper threads. Non-blocking (try_recv
+    /// only). Returns true when the screen changed.
+    pub(crate) fn poll_clipboard_results(&mut self) -> bool {
+        let mut changed = false;
+        let copy_out: Option<Option<String>> = match &self.copy_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(status) => Some(Some(status)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        if let Some(res) = copy_out {
+            self.copy_rx = None;
+            if let Some(status) = res {
+                self.status = status;
+            }
+            changed = true;
+        }
+        let paste_out: Option<Option<PasteDone>> = match &self.paste_rx {
+            Some(rx) => match rx.try_recv() {
+                Ok(done) => Some(Some(done)),
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => Some(None),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+            },
+            None => None,
+        };
+        if let Some(res) = paste_out {
+            self.paste_rx = None;
+            if let Some(done) = res {
+                self.apply_paste_done(done);
+            }
+            changed = true;
+        }
+        changed
+    }
+
+    fn apply_paste_done(&mut self, done: PasteDone) {
+        let mut pasted = false;
+        if let Some((b64, w, h)) = done.img {
+            let label = format!("{w}×{h}");
+            self.attach_pasted_image(b64, "image/png", label);
+            pasted = true;
+        }
+        if let Some(txt) = done.text {
+            if pasted {
+                if super::detect_image_path(&txt).is_none() {
+                    self.insert_pasted_text(&txt);
+                }
+            } else if let Some(path) = super::detect_image_path(&txt) {
+                match super::load_image_file(&path) {
+                    Ok((b64, mime, label)) => {
+                        self.attach_pasted_image(b64, mime, label);
+                    }
+                    Err(e) => {
+                        self.status = e;
+                        self.insert_pasted_text(&txt);
+                    }
+                }
+                pasted = true;
+            } else {
+                self.insert_pasted_text(&txt);
+                pasted = true;
+            }
+        }
+        if !pasted {
+            self.status = "clipboard empty".into();
+        }
+    }
+}
 
 pub(crate) fn osc52_copy_text(text: &str) -> Result<(usize, bool), String> {
     use std::io::Write as _;
@@ -301,6 +405,87 @@ mod tests {
         let (n, via) = osc52_copy_text("hi ✓").expect("osc52 writes");
         assert_eq!(n, 4);
         assert!(!via);
+    }
+
+    #[test]
+    fn copy_completion_reports_status_without_touching_clipboard() {
+        use crate::app::testkit::test_app;
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.copy_rx = Some(rx);
+        tx.send("copied 3 chars via xclip — selection kept (Esc clears)".into())
+            .unwrap();
+        assert!(app.poll_clipboard_results());
+        assert!(
+            app.status.contains("copied 3 chars"),
+            "status: {}",
+            app.status
+        );
+        assert!(app.copy_rx.is_none(), "receiver released");
+        assert!(!app.poll_clipboard_results(), "idle poll is quiet");
+    }
+
+    #[test]
+    fn paste_completion_inserts_text() {
+        use crate::app::testkit::test_app;
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.paste_rx = Some(rx);
+        tx.send(PasteDone {
+            img: None,
+            text: Some("hello paste".into()),
+        })
+        .unwrap();
+        assert!(app.poll_clipboard_results());
+        assert_eq!(app.input.text, "hello paste");
+        assert!(app.paste_rx.is_none(), "receiver released");
+    }
+
+    #[test]
+    fn paste_completion_attaches_image() {
+        use crate::app::testkit::test_app;
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.paste_rx = Some(rx);
+        tx.send(PasteDone {
+            img: Some(("aGVsbG8=".into(), 4, 2)),
+            text: None,
+        })
+        .unwrap();
+        assert!(app.poll_clipboard_results());
+        assert!(app.pending_image.is_some(), "image attached");
+        assert!(
+            app.input.text.contains("4×2"),
+            "chip inserted: {}",
+            app.input.text
+        );
+    }
+
+    #[test]
+    fn paste_completion_empty_reports_instead_of_inserting() {
+        use crate::app::testkit::test_app;
+        let mut app = test_app();
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.paste_rx = Some(rx);
+        tx.send(PasteDone {
+            img: None,
+            text: None,
+        })
+        .unwrap();
+        assert!(app.poll_clipboard_results());
+        assert_eq!(app.status, "clipboard empty");
+        assert!(app.input.text.is_empty(), "nothing inserted");
+    }
+
+    #[test]
+    fn begin_paste_marks_status_without_blocking() {
+        use crate::app::testkit::test_app;
+        let mut app = test_app();
+        app.begin_clipboard_paste(true);
+        assert_eq!(app.status, "reading clipboard…");
+        assert!(app.paste_rx.is_some(), "completion awaited");
+        // The helper thread owns any real clipboard stall; the test
+        // deliberately does not await it.
     }
 
     #[test]

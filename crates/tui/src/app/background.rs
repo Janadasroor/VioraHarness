@@ -94,7 +94,7 @@ impl App {
             return;
         }
         self.status = format!("working on finished task {}…", short_task_id(&done.id));
-        self.start_turn(Self::task_wake_prompt(done), None);
+        self.start_turn(Self::task_wake_prompt(done), None, "system");
     }
 
     pub(crate) fn is_busy_safe_slash(text: &str) -> bool {
@@ -247,7 +247,7 @@ impl App {
             if q.echo {
                 self.messages.push(Msg::new("user", q.send.clone()));
             }
-            self.start_turn(q.send, q.image);
+            self.start_turn(q.send, q.image, "user");
             return;
         }
     }
@@ -459,6 +459,81 @@ mod tests {
         if let Some(h) = app.pending.take() {
             h.abort();
         }
+        restore_db_env(prev, &db);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env_guard pins process-global VIORAHARNESS_DB
+    async fn wake_turn_persists_prompt_as_system() {
+        use vioraharness_core::tools::tasks;
+        let (db, prev, _env_guard) = with_temp_db("wake-role");
+        let mut app = test_app();
+        vioraharness_core::session::SessionStore::new(db.to_string_lossy().as_ref())
+            .expect("temp store")
+            .create_session(&app.session_id, "m", None)
+            .expect("session");
+        let t = tasks::spawn_task("echo role-probe", "/tmp");
+        wait_task_done(&t.id).await;
+        let _ = app.poll_task_completions();
+        assert!(app.busy, "wake turn started");
+        // The wake prompt row lands before the (doomed) provider call.
+        let mut role = String::new();
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < 10 {
+            if let Ok(store) =
+                vioraharness_core::session::SessionStore::new(db.to_string_lossy().as_ref())
+            {
+                if let Ok(rows) = store.get_messages(&app.session_id) {
+                    if let Some(r) = rows
+                        .iter()
+                        .find(|m| m.2.contains("[background task finished]"))
+                    {
+                        role = r.1.clone();
+                        break;
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(role, "system", "wake prompt never impersonates the user");
+        if let Some(h) = app.pending.take() {
+            h.abort();
+        }
+        app.busy = false;
+        restore_db_env(prev, &db);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // _env_guard pins process-global VIORAHARNESS_DB
+    async fn user_turn_persists_prompt_as_user() {
+        let (db, prev, _env_guard) = with_temp_db("user-role");
+        let mut app = test_app();
+        vioraharness_core::session::SessionStore::new(db.to_string_lossy().as_ref())
+            .expect("temp store")
+            .create_session(&app.session_id, "m", None)
+            .expect("session");
+        app.start_turn("hello-role-probe".into(), None, "user");
+        assert!(app.busy, "turn started");
+        let mut role = String::new();
+        let start = std::time::Instant::now();
+        while start.elapsed().as_secs() < 10 {
+            if let Ok(store) =
+                vioraharness_core::session::SessionStore::new(db.to_string_lossy().as_ref())
+            {
+                if let Ok(rows) = store.get_messages(&app.session_id) {
+                    if let Some(r) = rows.iter().find(|m| m.2.contains("hello-role-probe")) {
+                        role = r.1.clone();
+                        break;
+                    }
+                }
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(role, "user", "typed prompt keeps user role");
+        if let Some(h) = app.pending.take() {
+            h.abort();
+        }
+        app.busy = false;
         restore_db_env(prev, &db);
     }
 

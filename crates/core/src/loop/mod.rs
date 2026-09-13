@@ -86,7 +86,7 @@ impl AgentLoop {
         model: &str,
         session_id: Option<String>,
     ) -> anyhow::Result<String> {
-        self.run_inner(prompt, model, session_id, 0, None, None)
+        self.run_inner(prompt, model, session_id, 0, None, None, "user")
             .await
     }
 
@@ -98,8 +98,31 @@ impl AgentLoop {
         session_id: Option<String>,
         stream_tx: tokio::sync::mpsc::Sender<crate::provider::ProviderEvent>,
     ) -> anyhow::Result<String> {
-        self.run_inner(prompt, model, session_id, 0, Some(stream_tx), None)
+        self.run_inner(prompt, model, session_id, 0, Some(stream_tx), None, "user")
             .await
+    }
+
+    /// System-originated turn (e.g. background-task wake): the prompt is
+    /// persisted and sent as `system`, never as the user's own words, and
+    /// it never retitles the session.
+    #[async_recursion::async_recursion]
+    pub async fn run_streaming_system(
+        &self,
+        prompt: &str,
+        model: &str,
+        session_id: Option<String>,
+        stream_tx: tokio::sync::mpsc::Sender<crate::provider::ProviderEvent>,
+    ) -> anyhow::Result<String> {
+        self.run_inner(
+            prompt,
+            model,
+            session_id,
+            0,
+            Some(stream_tx),
+            None,
+            "system",
+        )
+        .await
     }
 
     #[async_recursion::async_recursion]
@@ -111,10 +134,13 @@ impl AgentLoop {
         stream_tx: tokio::sync::mpsc::Sender<crate::provider::ProviderEvent>,
         image: Option<(String, String)>,
     ) -> anyhow::Result<String> {
-        self.run_inner(prompt, model, session_id, 0, Some(stream_tx), image)
+        self.run_inner(prompt, model, session_id, 0, Some(stream_tx), image, "user")
             .await
     }
 
+    // Turn entry: prompt + routing + streaming + image + role travel
+    // together (8 args by construction).
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
         prompt: &str,
@@ -123,6 +149,7 @@ impl AgentLoop {
         depth: usize,
         stream_tx: Option<tokio::sync::mpsc::Sender<crate::provider::ProviderEvent>>,
         image: Option<(String, String)>,
+        prompt_role: &str,
     ) -> anyhow::Result<String> {
         if depth > 3 {
             anyhow::bail!("max subagent recursion depth 3 exceeded");
@@ -134,6 +161,14 @@ impl AgentLoop {
 
         let mut history: Vec<ChatMessage> = Vec::new();
         let mut is_new_session = true;
+        let is_system_prompt = prompt_role != "user";
+        // System prompts must never impersonate the user — not in history,
+        // not in titles.
+        let session_title = if is_system_prompt {
+            "Background task follow-up".to_string()
+        } else {
+            prompt.chars().take(80).collect::<String>()
+        };
         if let Some(ref s) = store {
             match s.get_session(&session_id) {
                 Ok(Some(_sess)) => {
@@ -143,18 +178,10 @@ impl AgentLoop {
                     let _ = s.touch_session(&session_id, Some(model));
                 }
                 Ok(None) => {
-                    let _ = s.create_session(
-                        &session_id,
-                        model,
-                        Some(prompt.chars().take(80).collect::<String>().as_str()),
-                    );
+                    let _ = s.create_session(&session_id, model, Some(session_title.as_str()));
                 }
                 Err(_) => {
-                    let _ = s.create_session(
-                        &session_id,
-                        model,
-                        Some(prompt.chars().take(80).collect::<String>().as_str()),
-                    );
+                    let _ = s.create_session(&session_id, model, Some(session_title.as_str()));
                 }
             }
         }
@@ -164,11 +191,16 @@ impl AgentLoop {
 
         messages.extend(history);
 
+        let kind_label = if is_system_prompt {
+            "System notice"
+        } else {
+            "User request"
+        };
         let user_msg = if let Some((mime, b64)) = image.clone() {
             ChatMessage::with_image_mime(
-                "user",
+                prompt_role,
                 format!(
-                    "{}\n\nUser request: {} [image attached]",
+                    "{}\n\n{kind_label}: {} [image attached]",
                     ctx.user_extra, prompt
                 ),
                 &mime,
@@ -176,8 +208,8 @@ impl AgentLoop {
             )
         } else {
             ChatMessage::text(
-                "user",
-                format!("{}\n\nUser request: {}", ctx.user_extra, prompt),
+                prompt_role,
+                format!("{}\n\n{kind_label}: {}", ctx.user_extra, prompt),
             )
         };
         messages.push(user_msg.clone());
@@ -186,7 +218,7 @@ impl AgentLoop {
         sanitize_tool_contiguity(&mut messages);
 
         if let Some(ref s) = store {
-            if is_new_session {
+            if is_new_session && !is_system_prompt {
                 let sid_clone = session_id.clone();
                 let prompt_clone = prompt.to_string();
                 let model_clone = model.to_string();
@@ -237,11 +269,11 @@ impl AgentLoop {
                 });
             }
             if is_new_session {
-                let _ = s.append_message(&session_id, "user", prompt);
+                let _ = s.append_message(&session_id, prompt_role, prompt);
             } else {
                 let _ = s.append_message_full(
                     &session_id,
-                    "user",
+                    prompt_role,
                     prompt,
                     None,
                     None,
@@ -250,12 +282,16 @@ impl AgentLoop {
                 );
             }
 
-            if let Ok(Some(sess)) = s.get_session(&session_id) {
-                if sess.title.is_none()
-                    || sess.title.as_deref().map(|t| t.len() < 5).unwrap_or(false)
-                {
-                    let _ =
-                        s.rename_session(&session_id, &prompt.chars().take(80).collect::<String>());
+            if !is_system_prompt {
+                if let Ok(Some(sess)) = s.get_session(&session_id) {
+                    if sess.title.is_none()
+                        || sess.title.as_deref().map(|t| t.len() < 5).unwrap_or(false)
+                    {
+                        let _ = s.rename_session(
+                            &session_id,
+                            &prompt.chars().take(80).collect::<String>(),
+                        );
+                    }
                 }
             }
         }
