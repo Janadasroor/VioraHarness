@@ -353,6 +353,25 @@ pub async fn browser_open(args: Value) -> Value {
         Ok(t) => t,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    // Headless screenshot needs no X server, but a visible window does.
+    // When the X socket is hidden (sandbox masks /tmp/.X11-unix, or no
+    // DISPLAY at all) say so upfront instead of failing silently.
+    let x11_hint = match std::env::var("DISPLAY").ok().filter(|s| !s.trim().is_empty()) {
+        None => Some(
+            "no DISPLAY in env (headless-only session?) — visible Chrome needs an X server; use browser_screenshot (headless) instead".to_string(),
+        ),
+        Some(d) => {
+            let num = d.trim_start_matches(':').split('.').next().unwrap_or("");
+            let sock = format!("/tmp/.X11-unix/X{num}");
+            if !Path::new(&sock).exists() {
+                Some(format!(
+                    "X11 socket {sock} not visible for DISPLAY={d} — use browser_screenshot (headless) or the browser_open host launcher"
+                ))
+            } else {
+                None
+            }
+        }
+    };
     let exe = match find_chrome() {
         Some(e) => e,
         None => {
@@ -366,13 +385,26 @@ pub async fn browser_open(args: Value) -> Value {
     cmd.stderr(std::process::Stdio::null());
     cmd.kill_on_drop(false);
     match cmd.spawn() {
-        Ok(child) => json!({
-            "ok": true,
-            "target": display,
-            "pid": child.id(),
-            "note": "opened in host Chrome (outside sandbox) for the user to see — verify with browser_screenshot, never xdotool windowclose"
-        }),
-        Err(e) => json!({"ok": false, "error": format!("open {display}: {e}"), "target": display}),
+        Ok(child) => {
+            let mut res = json!({
+                "ok": true,
+                "target": display,
+                "pid": child.id(),
+                "note": "opened in host Chrome (outside sandbox) for the user to see — verify with browser_screenshot, never xdotool windowclose"
+            });
+            if let Some(hint) = x11_hint {
+                res["x11_hint"] = json!(hint);
+            }
+            res
+        }
+        Err(e) => {
+            let mut res =
+                json!({"ok": false, "error": format!("open {display}: {e}"), "target": display});
+            if let Some(hint) = x11_hint {
+                res["x11_hint"] = json!(hint);
+            }
+            res
+        }
     }
 }
 

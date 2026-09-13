@@ -108,6 +108,7 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
     let _ = std::fs::create_dir_all(&log_base);
     bwrap.args(["--bind", &log_base, &log_base]);
 
+    let mut xauth_shim: Option<String> = None;
     if let Ok(home) = std::env::var("HOME") {
         let cargo_home = format!("{home}/.cargo");
         if Path::new(&cargo_home).exists() {
@@ -139,9 +140,15 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
         }
         // Writable Xauthority copy: X clients must lock the authority
         // file, which fails on the read-only host bind. The copy keeps
-        // the same cookie, mode 0600.
-        let xauth_src =
-            std::env::var("XAUTHORITY").unwrap_or_else(|_| format!("{home}/.Xauthority"));
+        // the same cookie, mode 0600. Empty counts as unset (hosts
+        // without XAUTHORITY in env still use ~/.Xauthority by default).
+        // Propagated via explicit --setenv so the value is guaranteed
+        // inside even when the parent env is scrubbed; the process env
+        // is set too for bwrap's own inheritance path.
+        let xauth_src = std::env::var("XAUTHORITY")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| format!("{home}/.Xauthority"));
         if Path::new(&xauth_src).exists() {
             let shim_dir = "/tmp/vioraharness-xauth";
             let shim = format!("{shim_dir}/Xauthority");
@@ -158,8 +165,9 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
                     }
                 }
                 if !envs.iter().any(|(k, _)| k == "XAUTHORITY") {
-                    envs.push(("XAUTHORITY".into(), Some(shim)));
+                    envs.push(("XAUTHORITY".into(), Some(shim.clone())));
                 }
+                xauth_shim = Some(shim);
             }
         }
     }
@@ -173,6 +181,22 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
             bwrap.env(k, val);
         } else {
             bwrap.env_remove(k);
+        }
+    }
+    // Explicit --setenv guarantees the values inside regardless of how
+    // the parent env was scrubbed; process-env inheritance alone is
+    // fragile (empty host XAUTHORITY reads as "no cookie" to X clients).
+    if let Some(shim) = xauth_shim {
+        bwrap.args([
+            "--bind-try",
+            "/tmp/vioraharness-xauth",
+            "/tmp/vioraharness-xauth",
+        ]);
+        bwrap.args(["--setenv", "XAUTHORITY", &shim]);
+    }
+    if let Ok(display) = std::env::var("DISPLAY") {
+        if !display.trim().is_empty() {
+            bwrap.args(["--setenv", "DISPLAY", &display]);
         }
     }
     bwrap.arg("--");
@@ -235,8 +259,41 @@ mod tests {
             dbg.contains("/tmp/vioraharness-xauth/Xauthority"),
             "XAUTHORITY rewritten to writable copy: {dbg}"
         );
+        assert!(
+            dbg.contains("--setenv"),
+            "XAUTHORITY pinned via explicit --setenv, not just process env: {dbg}"
+        );
         let shim = std::path::Path::new("/tmp/vioraharness-xauth/Xauthority");
         assert_eq!(std::fs::read(shim).unwrap(), b"cookie-data");
+    }
+
+    #[test]
+    fn empty_xauthority_falls_back_to_home_file() {
+        // Hosts without XAUTHORITY in env (GDM default) still use
+        // ~/.Xauthority — an empty string must not become the source path.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("XAUTHORITY").ok();
+        let home = std::env::var("HOME").expect("HOME set in test env");
+        let home_xauth = std::path::Path::new(&home).join(".Xauthority");
+        if !home_xauth.exists() {
+            match prev {
+                Some(v) => std::env::set_var("XAUTHORITY", v),
+                None => std::env::remove_var("XAUTHORITY"),
+            }
+            return;
+        }
+        std::env::set_var("XAUTHORITY", "");
+        let mut cmd = tokio::process::Command::new("true");
+        wrap_command(&mut cmd, "/tmp");
+        let dbg = format!("{:?}", cmd.as_std());
+        match prev {
+            Some(v) => std::env::set_var("XAUTHORITY", v),
+            None => std::env::remove_var("XAUTHORITY"),
+        }
+        assert!(
+            dbg.contains("/tmp/vioraharness-xauth/Xauthority"),
+            "empty XAUTHORITY still shims ~/.Xauthority: {dbg}"
+        );
     }
 
     #[test]

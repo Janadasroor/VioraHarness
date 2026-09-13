@@ -463,6 +463,106 @@ pub(crate) async fn cmd_doctor(config: Option<String>) -> anyhow::Result<()> {
             break;
         }
     }
+    println!("  desktop/x11:");
+    {
+        let display = std::env::var("DISPLAY").unwrap_or_default();
+        if display.trim().is_empty() {
+            println!("    DISPLAY: unset (headless-only; browser_screenshot still works)");
+        } else {
+            let sock = display
+                .trim_start_matches(':')
+                .split('.')
+                .next()
+                .unwrap_or("");
+            let sock_path = format!("/tmp/.X11-unix/X{sock}");
+            let visible = std::path::Path::new(&sock_path).exists();
+            println!(
+                "    DISPLAY={display} socket {sock_path} {}",
+                if visible {
+                    "visible ✓"
+                } else {
+                    "hidden ✗ (sandbox masks it — use browser_screenshot headless or browser_open host launcher)"
+                }
+            );
+        }
+        let xauth_env = std::env::var("XAUTHORITY")
+            .ok()
+            .filter(|s| !s.trim().is_empty());
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let fallback = format!("{home}/.Xauthority");
+        let shim = "/tmp/vioraharness-xauth/Xauthority";
+        println!(
+            "    XAUTHORITY env: {}",
+            xauth_env
+                .as_deref()
+                .unwrap_or("(unset — defaults to ~/.Xauthority)")
+        );
+        for p in [fallback.as_str(), shim] {
+            println!(
+                "      {p}: {}",
+                if std::path::Path::new(p).exists() {
+                    "present ✓"
+                } else {
+                    "missing"
+                }
+            );
+        }
+        let which = |bin: &str| {
+            std::env::var("PATH")
+                .map(|path| {
+                    path.split(':').any(|d| {
+                        !d.is_empty() && std::path::Path::new(&format!("{d}/{bin}")).exists()
+                    })
+                })
+                .unwrap_or(false)
+        };
+        for bin in [
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ] {
+            if which(bin) {
+                println!("    chrome: {bin} found ✓");
+                break;
+            }
+        }
+        if ![
+            "google-chrome",
+            "google-chrome-stable",
+            "chromium",
+            "chromium-browser",
+        ]
+        .iter()
+        .any(|b| which(b))
+        {
+            println!("    chrome: not found (install google-chrome/chromium or set CHROME_BIN)");
+        }
+        println!(
+            "    xdotool: {}",
+            if which("xdotool") {
+                "present ✓"
+            } else {
+                "missing (optional)"
+            }
+        );
+        println!(
+            "    xwininfo: {}",
+            if which("xwininfo") {
+                "present ✓"
+            } else {
+                "missing (optional)"
+            }
+        );
+        println!(
+            "    wmctrl: {}",
+            if which("wmctrl") {
+                "present ✓"
+            } else {
+                "missing (optional — not bundled; use `xdotool search --onlyvisible --name <title>` or `xwininfo -root -tree` instead)"
+            }
+        );
+    }
     let db = std::env::var("VIORAHARNESS_DB")
         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
     println!("  db: {db}");
