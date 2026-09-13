@@ -41,6 +41,7 @@
     "bash xdotool windowkill*": "ask",
     "bash xdotool windowunmap*": "ask",
     "browser_dom": "allow",
+    "browser_open": "ask",
     "browser_pdf": "allow",
     "browser_screenshot": "allow",
     "dev_serve": "allow",

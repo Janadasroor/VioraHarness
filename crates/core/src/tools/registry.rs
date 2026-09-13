@@ -264,7 +264,8 @@ impl ToolRegistry {
             },
             "required":["query"]
         }));
-        self.register("browser_screenshot", "Screenshot a page with headless Chrome CLI (local .html or http(s), incl. localhost dev servers). Returns PNG base64 vision — use after web edits for visual feedback, like schematic-render.", json!({
+        self.register(            "browser_screenshot",
+            "Screenshot a page with headless Chrome CLI (local .html or http(s), incl. localhost dev servers). Returns PNG base64 vision — use after web edits for visual feedback, like schematic-render. Local targets with default out also auto-save ./screenshot-latest.png (pass out: to override).", json!({
             "type":"object",
             "properties":{
                 "target":{"type":"string","description":"http(s) URL or local .html path"},
@@ -292,6 +293,17 @@ impl ToolRegistry {
                 "properties":{
                     "target":{"type":"string","description":"http(s) URL or local .html path"},
                     "out":{"type":"string","description":"output PDF path (default /tmp)"}
+                },
+                "required":["target"]
+            }),
+        );
+        self.register(
+            "browser_open",
+            "Open a page in the user's VISIBLE host Chrome (new window, outside the sandbox). Ask-gated: use when the user should see/click the page themselves; verify with browser_screenshot, never xdotool.",
+            json!({
+                "type":"object",
+                "properties":{
+                    "target":{"type":"string","description":"http(s) URL or local .html path"}
                 },
                 "required":["target"]
             }),
@@ -369,6 +381,7 @@ mod tests {
             "browser_screenshot",
             "browser_dom",
             "browser_pdf",
+            "browser_open",
             "dev_serve",
             "viora",
             "netlist_run",

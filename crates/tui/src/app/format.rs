@@ -308,7 +308,7 @@ pub(crate) fn pretty_tool_args_wide(name: &str, args: &str, wide: bool) -> Strin
                     return pat.to_string();
                 }
             }
-            "browser_screenshot" | "browser_dom" | "browser_pdf" => {
+            "browser_screenshot" | "browser_dom" | "browser_pdf" | "browser_open" => {
                 let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("");
                 if target.is_empty() {
                     return String::new();

@@ -604,6 +604,7 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
         "browser_screenshot" => browser::browser_screenshot(args).await,
         "browser_dom" => browser::browser_dom(args).await,
         "browser_pdf" => browser::browser_pdf(args).await,
+        "browser_open" => browser::browser_open(args).await,
         "dev_serve" => browser::dev_serve(args).await,
         _ => json!({"ok": false, "error": format!("unknown tool: {}", name)}),
     }

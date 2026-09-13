@@ -192,6 +192,14 @@ async fn run_chrome(args: &[String]) -> Result<std::process::Output, String> {
     }
 }
 
+fn is_local_url(url: &str) -> bool {
+    url.starts_with("file://")
+        || url.starts_with("http://localhost")
+        || url.starts_with("http://127.0.0.1")
+        || url.starts_with("https://localhost")
+        || url.starts_with("https://127.0.0.1")
+}
+
 fn truncate_chars_capped(s: &str, max: usize) -> (String, bool) {
     if s.chars().count() <= max {
         return (s.to_string(), false);
@@ -205,6 +213,7 @@ pub async fn browser_screenshot(args: Value) -> Value {
         Ok(t) => t,
         Err(e) => return json!({"ok": false, "error": e}),
     };
+    let out_defaulted = args.get("out").and_then(|v| v.as_str()).is_none();
     let out_str = args
         .get("out")
         .and_then(|v| v.as_str())
@@ -252,7 +261,7 @@ pub async fn browser_screenshot(args: Value) -> Value {
     }
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
     let b64 = BASE64.encode(&bytes);
-    json!({
+    let mut res = json!({
         "ok": true,
         "target": display,
         "out": out_cli,
@@ -262,7 +271,26 @@ pub async fn browser_screenshot(args: Value) -> Value {
         "base64": b64,
         "base64_len": b64.len(),
         "note": "screenshot attached as vision (base64 stripped from text) — describe what you see, don't dump pixels"
-    })
+    });
+    // Local targets with default out: also drop a copy at
+    // ./screenshot-latest.png so web loops don't need a manual cp.
+    // Best-effort — a copy failure never fails the screenshot.
+    if out_defaulted && is_local_url(&url) {
+        let latest = std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("/tmp"))
+            .join("screenshot-latest.png");
+        match tokio::fs::copy(&out_path, &latest).await {
+            Ok(_) => {
+                res["latest"] = json!(latest.to_string_lossy());
+            }
+            Err(e) => {
+                res["latest_error"] = json!(format!(
+                    "auto-copy to ./screenshot-latest.png failed: {e} (out kept at {out_cli})"
+                ));
+            }
+        }
+    }
+    res
 }
 
 pub async fn browser_dom(args: Value) -> Value {
@@ -313,6 +341,39 @@ pub async fn browser_dom(args: Value) -> Value {
         "html_chars": html.chars().count(),
         "text": content,
     })
+}
+
+/// Open a page in the user's visible host Chrome. Unlike the other
+/// browser tools this deliberately runs OUTSIDE the bwrap sandbox (a
+/// sandboxed window is invisible in another PID/mount namespace), so it
+/// is Ask-gated: approve each launch in the dialog or run with -y.
+pub async fn browser_open(args: Value) -> Value {
+    let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("");
+    let (url, display) = match resolve_target(target) {
+        Ok(t) => t,
+        Err(e) => return json!({"ok": false, "error": e}),
+    };
+    let exe = match find_chrome() {
+        Some(e) => e,
+        None => {
+            return json!({"ok": false, "error": "chrome not found (install google-chrome or chromium, or set CHROME_BIN)"})
+        }
+    };
+    let mut cmd = tokio::process::Command::new(&exe);
+    cmd.arg("--new-window").arg(&url);
+    cmd.stdin(std::process::Stdio::null());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+    cmd.kill_on_drop(false);
+    match cmd.spawn() {
+        Ok(child) => json!({
+            "ok": true,
+            "target": display,
+            "pid": child.id(),
+            "note": "opened in host Chrome (outside sandbox) for the user to see — verify with browser_screenshot, never xdotool windowclose"
+        }),
+        Err(e) => json!({"ok": false, "error": format!("open {display}: {e}"), "target": display}),
+    }
 }
 
 pub async fn browser_pdf(args: Value) -> Value {
@@ -441,6 +502,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn open_rejects_bad_target_without_spawning() {
+        let r = browser_open(json!({"target": ""})).await;
+        assert_eq!(r["ok"], false);
+        assert!(
+            r["error"].as_str().unwrap().contains("missing target"),
+            "{r}"
+        );
+        assert!(r.get("pid").is_none(), "nothing spawned: {r}");
+    }
+
+    #[tokio::test]
     async fn dom_rejects_bad_target_without_spawning() {
         let r = browser_dom(json!({"target": "ftp://x/y"})).await;
         assert_eq!(r["ok"], false, "{r}");
@@ -479,6 +551,20 @@ mod tests {
             r["error"].as_str().unwrap().contains("not a directory"),
             "{r}"
         );
+    }
+
+    #[test]
+    fn local_url_detection() {
+        for u in [
+            "file:///tmp/x.html",
+            "http://localhost:5173/",
+            "http://127.0.0.1:8000/a",
+        ] {
+            assert!(is_local_url(u), "{u}");
+        }
+        for u in ["https://example.com/", "http://192.168.1.50:3000/"] {
+            assert!(!is_local_url(u), "{u}");
+        }
     }
 
     #[test]

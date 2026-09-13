@@ -58,7 +58,7 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
         .map(|a| a.to_string_lossy().to_string())
         .collect();
 
-    let envs: Vec<(String, Option<String>)> = base
+    let mut envs: Vec<(String, Option<String>)> = base
         .as_std()
         .get_envs()
         .map(|(k, v)| {
@@ -79,10 +79,12 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
 
     if Path::new("/tmp").exists() {
         bwrap.args(["--bind", "/tmp", "/tmp"]);
+        // Bind (don't mask) the X11/ICE socket dirs: the sandbox shares
+        // the host net namespace, so abstract X sockets already work —
+        // masking only the fs path breaks X clients without adding
+        // isolation. ro-bind still prevents writes outside the sockets.
         for sockdir in ["/tmp/.X11-unix", "/tmp/.ICE-unix"] {
-            if Path::new(sockdir).exists() {
-                bwrap.args(["--tmpfs", sockdir]);
-            }
+            bwrap.args(["--ro-bind-try", sockdir, sockdir]);
         }
     } else {
         bwrap.args(["--tmpfs", "/tmp"]);
@@ -114,6 +116,51 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
         let config_home = format!("{home}/.config");
         if Path::new(&config_home).exists() {
             bwrap.args(["--ro-bind-try", &config_home, &config_home]);
+        }
+        // Sandboxed Chrome gets a throwaway profile shadowing the real
+        // one (later binds win): the read-only real profile otherwise
+        // spams crashpad/NSS write errors, and sharing it would expose
+        // the user's cookies/sessions to agent-driven Chrome.
+        let chrome_profile = format!("{config_home}/google-chrome");
+        if Path::new(&chrome_profile).exists() {
+            let shim = "/tmp/vioraharness-chrome-home/google-chrome";
+            if std::fs::create_dir_all(shim).is_ok() {
+                bwrap.args(["--bind-try", shim, &chrome_profile]);
+            }
+        }
+        // Same treatment for the NSS cert database Chrome prods at
+        // startup: throwaway writable copy, real one stays untouched.
+        let nss_db = format!("{home}/.pki/nssdb");
+        if Path::new(&nss_db).exists() {
+            let shim = "/tmp/vioraharness-chrome-home/nssdb";
+            if std::fs::create_dir_all(shim).is_ok() {
+                bwrap.args(["--bind-try", shim, &nss_db]);
+            }
+        }
+        // Writable Xauthority copy: X clients must lock the authority
+        // file, which fails on the read-only host bind. The copy keeps
+        // the same cookie, mode 0600.
+        let xauth_src =
+            std::env::var("XAUTHORITY").unwrap_or_else(|_| format!("{home}/.Xauthority"));
+        if Path::new(&xauth_src).exists() {
+            let shim_dir = "/tmp/vioraharness-xauth";
+            let shim = format!("{shim_dir}/Xauthority");
+            if std::fs::create_dir_all(shim_dir).is_ok() && std::fs::copy(&xauth_src, &shim).is_ok()
+            {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o600));
+                }
+                for (k, v) in envs.iter_mut() {
+                    if k == "XAUTHORITY" {
+                        *v = Some(shim.clone());
+                    }
+                }
+                if !envs.iter().any(|(k, _)| k == "XAUTHORITY") {
+                    envs.push(("XAUTHORITY".into(), Some(shim)));
+                }
+            }
         }
     }
 
@@ -154,7 +201,47 @@ mod tests {
     }
 
     #[test]
+    fn x11_socket_dir_is_bound_not_masked() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let mut cmd = tokio::process::Command::new("true");
+        wrap_command(&mut cmd, "/tmp");
+        let dbg = format!("{:?}", cmd.as_std());
+        assert!(dbg.contains(".X11-unix"), "X11 socket dir forwarded: {dbg}");
+        assert!(
+            !dbg.contains("tmpfs"),
+            "no tmpfs masking of socket dirs: {dbg}"
+        );
+    }
+
+    #[test]
+    fn xauthority_shim_points_at_writable_copy() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("XAUTHORITY").ok();
+        let dir = std::env::temp_dir().join(format!("vh-xauth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let src = dir.join("Xauthority");
+        std::fs::write(&src, b"cookie-data").unwrap();
+        std::env::set_var("XAUTHORITY", &src);
+        let mut cmd = tokio::process::Command::new("true");
+        wrap_command(&mut cmd, "/tmp");
+        let dbg = format!("{:?}", cmd.as_std());
+        match prev {
+            Some(v) => std::env::set_var("XAUTHORITY", v),
+            None => std::env::remove_var("XAUTHORITY"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            dbg.contains("/tmp/vioraharness-xauth/Xauthority"),
+            "XAUTHORITY rewritten to writable copy: {dbg}"
+        );
+        let shim = std::path::Path::new("/tmp/vioraharness-xauth/Xauthority");
+        assert_eq!(std::fs::read(shim).unwrap(), b"cookie-data");
+    }
+
+    #[test]
     fn wrap_includes_viora_state_bind() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let mut cmd = tokio::process::Command::new("true");
         wrap_command(&mut cmd, "/tmp");
         let dbg = format!("{:?}", cmd.as_std());
