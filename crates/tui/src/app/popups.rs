@@ -437,9 +437,10 @@ impl App {
                     if !key.modifiers.contains(KeyModifiers::CONTROL)
                         && !key.modifiers.contains(KeyModifiers::ALT) =>
                 {
-                    let is_cmd =
-                        matches!(c, 'n' | 'N' | 'f' | 'F' | 'a' | 'A' | 'd' | 'D' | 'r' | 'R')
-                            && self.session_filter.is_empty();
+                    let is_cmd = matches!(
+                        c,
+                        'n' | 'N' | 'f' | 'F' | 'a' | 'A' | 'd' | 'D' | 'r' | 'R' | 'p' | 'P'
+                    ) && self.session_filter.is_empty();
                     if !is_cmd {
                         self.session_filter.push(c);
                         self.session_cursor = 0;
@@ -467,7 +468,13 @@ impl App {
                                 {
                                     let parent_id = {
                                         let all = store
-                                            .list_sessions_filtered(None, None, true, 50, 0)
+                                            .list_sessions_filtered(
+                                                self.session_scope_filter().as_deref(),
+                                                None,
+                                                true,
+                                                50,
+                                                0,
+                                            )
                                             .unwrap_or_default();
                                         let f = self.session_filter.to_lowercase();
                                         let filtered: Vec<_> = all
@@ -603,7 +610,13 @@ impl App {
                                     vioraharness_core::session::SessionStore::new(&db)
                                 {
                                     let all = store
-                                        .list_sessions_filtered(None, None, true, 50, 0)
+                                        .list_sessions_filtered(
+                                            self.session_scope_filter().as_deref(),
+                                            None,
+                                            true,
+                                            50,
+                                            0,
+                                        )
                                         .unwrap_or_default();
                                     let f = self.session_filter.to_lowercase();
                                     let filtered: Vec<_> = all
@@ -645,7 +658,13 @@ impl App {
                                     vioraharness_core::session::SessionStore::new(&db)
                                 {
                                     let all = store
-                                        .list_sessions_filtered(None, None, true, 50, 0)
+                                        .list_sessions_filtered(
+                                            self.session_scope_filter().as_deref(),
+                                            None,
+                                            true,
+                                            50,
+                                            0,
+                                        )
                                         .unwrap_or_default();
                                     let f = self.session_filter.to_lowercase();
                                     let filtered: Vec<_> = all
@@ -683,6 +702,10 @@ impl App {
                                     "Rename: use /rename <title> in input (or /sessions then r)",
                                 ));
                             }
+                            'p' | 'P' => {
+                                self.show_all_sessions = !self.show_all_sessions;
+                                self.session_cursor = 0;
+                            }
                             _ => {
                                 self.session_filter.push(c);
                                 self.session_cursor = 0;
@@ -695,7 +718,13 @@ impl App {
                         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
                     if let Ok(store) = vioraharness_core::session::SessionStore::new(&db) {
                         let all = store
-                            .list_sessions_filtered(None, None, true, 50, 0)
+                            .list_sessions_filtered(
+                                self.session_scope_filter().as_deref(),
+                                None,
+                                true,
+                                50,
+                                0,
+                            )
                             .unwrap_or_default();
                         let f = self.session_filter.to_lowercase();
                         let filtered: Vec<_> = all
@@ -829,9 +858,13 @@ impl App {
                         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
                     if let Ok(store) = vioraharness_core::session::SessionStore::new(&db) {
                         let parent_id = {
-                            if let Ok(sessions) =
-                                store.list_sessions_filtered(None, None, false, 50, 0)
-                            {
+                            if let Ok(sessions) = store.list_sessions_filtered(
+                                self.session_scope_filter().as_deref(),
+                                None,
+                                false,
+                                50,
+                                0,
+                            ) {
                                 sessions
                                     .get(self.session_cursor)
                                     .map(|s| s.id.clone())
@@ -890,8 +923,13 @@ impl App {
                     let db = std::env::var("VIORAHARNESS_DB")
                         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
                     if let Ok(store) = vioraharness_core::session::SessionStore::new(&db) {
-                        if let Ok(sessions) = store.list_sessions_filtered(None, None, false, 50, 0)
-                        {
+                        if let Ok(sessions) = store.list_sessions_filtered(
+                            self.session_scope_filter().as_deref(),
+                            None,
+                            false,
+                            50,
+                            0,
+                        ) {
                             if let Some(sess) = sessions.get(self.session_cursor) {
                                 let _ = store.archive_session(&sess.id);
                                 self.messages.push(Msg::new(
@@ -914,8 +952,13 @@ impl App {
                     let db = std::env::var("VIORAHARNESS_DB")
                         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
                     if let Ok(store) = vioraharness_core::session::SessionStore::new(&db) {
-                        if let Ok(sessions) = store.list_sessions_filtered(None, None, false, 50, 0)
-                        {
+                        if let Ok(sessions) = store.list_sessions_filtered(
+                            self.session_scope_filter().as_deref(),
+                            None,
+                            false,
+                            50,
+                            0,
+                        ) {
                             if let Some(sess) = sessions.get(self.session_cursor) {
                                 let id = sess.id.clone();
                                 let _ = store.delete_session(&id);
@@ -1610,6 +1653,23 @@ mod tests {
         assert_eq!(app.model_cursor, page * 2);
         app.handle_popup_key(KeyEvent::new(KeyCode::PageUp, KeyModifiers::empty()));
         assert_eq!(app.model_cursor, page);
+    }
+
+    #[test]
+    fn sessions_scope_toggle_flips_project_filter() {
+        let mut app = test_app();
+        app.popup = Popup::Sessions;
+        assert!(!app.show_all_sessions);
+        assert!(
+            app.session_scope_filter().is_some(),
+            "project-scoped by default"
+        );
+        app.handle_popup_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::empty()));
+        assert!(app.show_all_sessions, "p shows all folders");
+        assert!(app.session_scope_filter().is_none());
+        assert!(app.popup == Popup::Sessions, "dialog stays open");
+        app.handle_popup_key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::empty()));
+        assert!(!app.show_all_sessions, "P scopes back to this folder");
     }
 
     #[test]

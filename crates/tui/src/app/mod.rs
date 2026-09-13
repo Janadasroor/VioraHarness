@@ -73,6 +73,7 @@ pub struct App {
     pub(crate) rewind_armed: Option<i64>,
     pub(crate) rewind_armed_note: Option<String>,
     pub(crate) session_filter: String,
+    pub(crate) show_all_sessions: bool,
 
     pub(crate) provider_cursor: usize,
     pub(crate) provider_key_input: String,
@@ -901,6 +902,24 @@ impl App {
         Self::verbosity_for(&self.tool_display, &self.tool_display_default, name)
     }
 
+    /// Project hash of the process cwd — matches what `create_session`
+    /// stores, so pickers can scope to this folder.
+    pub(crate) fn project_filter_for_cwd() -> Option<String> {
+        std::env::current_dir()
+            .ok()
+            .map(|p| vioraharness_core::session::project_hash_for_cwd(&p.to_string_lossy()))
+    }
+
+    /// Session-picker scope: current project by default, everything when
+    /// the `p` toggle in `/sessions` is on.
+    pub(crate) fn session_scope_filter(&self) -> Option<String> {
+        if self.show_all_sessions {
+            None
+        } else {
+            Self::project_filter_for_cwd()
+        }
+    }
+
     /// Single-line-cap preview for a tool result, or None when hidden.
     /// Shared by render and the Ctrl+X toggle so both agree on collapse.
     pub(crate) fn tool_result_preview(
@@ -1311,6 +1330,7 @@ impl App {
             rewind_armed: None,
             rewind_armed_note: None,
             session_filter: String::new(),
+            show_all_sessions: false,
             provider_cursor: 0,
             provider_key_input: String::new(),
             provider_input_active: false,

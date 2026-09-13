@@ -127,7 +127,7 @@ impl App {
                 let mut lines: Vec<Line> = Vec::new();
 
                 let sess_result = vioraharness_core::session::SessionStore::new(&db)
-                    .and_then(|store| store.list_sessions_filtered(None, None, true, 50, 0));
+                    .and_then(|store| store.list_sessions_filtered(self.session_scope_filter().as_deref(), None, true, 50, 0));
                 match sess_result {
                     Ok(all) if all.is_empty() => {
                         lines.push(Line::from(Span::styled("No chats yet. Run a prompt or /new to create one.", Style::default().fg(Color::Yellow))));
@@ -150,10 +150,10 @@ impl App {
                             Span::styled(" Filter: ", Style::default().fg(Color::Yellow)),
                             Span::styled(filter_display, filter_style),
                             Span::styled(" ▌", Style::default().fg(Color::Cyan)),
-                            Span::raw(format!("  ({} shown{})", total, if filter.is_empty() { "" } else { " filtered" })),
+                            Span::raw(format!("  ({} shown{} • {})", total, if filter.is_empty() { "" } else { " filtered" }, if self.show_all_sessions { "all folders" } else { "this folder" })),
                         ]));
                         lines.push(Line::from(Span::styled(
-                            format!(" Chats — {} saved • {} msgs current • {}  • Enter resume • n new • f fork • r rename • a archive • d delete • Esc close ", total, self.messages.len(), &self.session_id[..8.min(self.session_id.len())]),
+                            format!(" Chats — {} saved • {} msgs current • {}  • Enter resume • n new • f fork • r rename • a archive • d delete • p project/all • Esc close ", total, self.messages.len(), &self.session_id[..8.min(self.session_id.len())]),
                             Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                         )));
                         lines.push(Line::from(Span::styled(" ───────────────────────────────────────────────────────", Style::default().fg(Color::DarkGray))));

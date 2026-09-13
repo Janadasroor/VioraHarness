@@ -27,6 +27,7 @@ impl App {
             "/sessions" | "/chats" | "/history" | "/conversations" | "/ls" | "/convs" => {
                 self.session_filter.clear();
                 self.session_cursor = 0;
+                self.show_all_sessions = false;
                 self.popup = Popup::Sessions;
             }
             "/providers" | "/provider" | "/auth" | "/keys" => {
@@ -324,6 +325,7 @@ impl App {
                     }
                 } else {
                     self.session_cursor = 0;
+                    self.show_all_sessions = false;
                     self.popup = Popup::Sessions;
                 }
             }

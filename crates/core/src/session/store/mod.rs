@@ -244,6 +244,12 @@ pub(crate) fn md5ish(s: &str) -> u64 {
     h
 }
 
+/// Project hash for a cwd — the same derivation `create_session` stores,
+/// so pickers can scope their lists to the current project.
+pub fn project_hash_for_cwd(cwd: &str) -> String {
+    format!("{:x}", md5ish(cwd))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,6 +310,44 @@ mod tests {
 
     fn mem_store() -> SessionStore {
         SessionStore::new_in_memory().expect("in-memory store")
+    }
+
+    #[test]
+    fn project_hash_scopes_picker_lists() {
+        let s = mem_store();
+        let ha = project_hash_for_cwd("/proj/a");
+        let hb = project_hash_for_cwd("/proj/b");
+        assert_ne!(ha, hb);
+        assert_eq!(ha, project_hash_for_cwd("/proj/a"), "stable");
+        s.create_session_full(
+            "sess-a",
+            "m",
+            Some("t"),
+            Some("/proj/a"),
+            Some(&ha),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        s.create_session_full(
+            "sess-b",
+            "m",
+            Some("t"),
+            Some("/proj/b"),
+            Some(&hb),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        let only_a = s
+            .list_sessions_filtered(Some(&ha), None, true, 50, 0)
+            .unwrap();
+        assert_eq!(only_a.len(), 1);
+        assert_eq!(only_a[0].id, "sess-a");
+        let all = s.list_sessions_filtered(None, None, true, 50, 0).unwrap();
+        assert_eq!(all.len(), 2);
     }
 
     fn mk(store: &SessionStore, id: &str, cwd: &str, with_msg: bool, updated: i64) {

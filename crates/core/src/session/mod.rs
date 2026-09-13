@@ -4,4 +4,5 @@ pub mod snapshot;
 pub mod store;
 pub mod types;
 
+pub use store::project_hash_for_cwd;
 pub use store::SessionStore;

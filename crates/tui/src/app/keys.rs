@@ -310,7 +310,9 @@ impl App {
         let db = std::env::var("VIORAHARNESS_DB")
             .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
         vioraharness_core::session::SessionStore::new(&db)
-            .and_then(|s| s.list_sessions_filtered(None, None, true, 50, 0))
+            .and_then(|s| {
+                s.list_sessions_filtered(self.session_scope_filter().as_deref(), None, true, 50, 0)
+            })
             .map(|all| {
                 let f = self.session_filter.to_lowercase();
                 if f.is_empty() {
