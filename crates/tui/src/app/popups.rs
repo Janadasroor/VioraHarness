@@ -743,6 +743,7 @@ impl App {
                             let id = sess.id.clone();
                             let model = sess.model.clone();
                             let theme = sess.theme.clone();
+                            let stored_mode = sess.mode.clone();
 
                             match store.get_messages_detailed(&id) {
                                 Ok(msgs) => {
@@ -750,6 +751,12 @@ impl App {
                                     self.model = model.clone();
                                     if let Some(th) = theme {
                                         Self::save_tui_state(serde_json::json!({"last_theme": th}));
+                                    }
+                                    if let Some(m) = stored_mode {
+                                        let norm = vioraharness_core::mode::normalize_mode_name(&m);
+                                        if vioraharness_core::mode::is_known_mode(&norm) {
+                                            self.agent_mode = norm;
+                                        }
                                     }
                                     Self::save_tui_state(
                                         serde_json::json!({"last_model": self.model}),

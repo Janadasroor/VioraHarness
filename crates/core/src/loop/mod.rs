@@ -20,6 +20,10 @@ pub struct AgentLoop {
     pub registry: ToolRegistry,
     pub rules: Vec<Rule>,
     pub max_tokens: usize,
+    /// Agent mode for this loop (`eda` = full tools). The registry is
+    /// built from the mode, so the model only sees mode tools; dispatch
+    /// additionally fails closed on anything outside it.
+    pub mode: String,
     /// Inbound `$` instant prompts. The TUI clones this before spawning a
     /// turn and pushes while it runs; `run_inner` drains it at turn
     /// boundaries. Unused (always empty) for server-spawned loops.
@@ -62,10 +66,33 @@ impl Default for AgentLoop {
 impl AgentLoop {
     pub fn new() -> Self {
         let rules = load_rules_from_config();
+        let mode = crate::mode::resolve_mode(None);
+        let registry = crate::mode::registry_for_mode(&mode);
         Self {
-            registry: ToolRegistry::new(),
+            registry,
             rules,
             max_tokens: 128_000,
+            mode,
+            injector: Injector::default(),
+        }
+    }
+
+    /// Loop scoped to an agent mode: unknown names fall back to `eda`
+    /// (callers taking user input should reject via `is_known_mode` first).
+    pub fn with_mode(name: &str) -> Self {
+        let mode = crate::mode::normalize_mode_name(name);
+        let mode = if crate::mode::is_known_mode(&mode) {
+            mode
+        } else {
+            tracing::warn!("unknown mode '{name}' — falling back to eda");
+            crate::mode::DEFAULT_MODE.to_string()
+        };
+        let registry = crate::mode::registry_for_mode(&mode);
+        Self {
+            registry,
+            rules: load_rules_from_config(),
+            max_tokens: 128_000,
+            mode,
             injector: Injector::default(),
         }
     }
@@ -75,6 +102,7 @@ impl AgentLoop {
             registry,
             rules: load_rules_from_config(),
             max_tokens: 128_000,
+            mode: crate::mode::ModeGuard::current(),
             injector: Injector::default(),
         }
     }
@@ -154,6 +182,10 @@ impl AgentLoop {
         if depth > 3 {
             anyhow::bail!("max subagent recursion depth 3 exceeded");
         }
+        // Pin VIORAHARNESS_MODE for the whole turn so background tasks,
+        // subagents, and artifact naming all tag/scope to this turn's
+        // mode. Restored on drop — modes never leak across turns.
+        let _mode_guard = crate::mode::ModeGuard::hold(&self.mode);
         let provider = crate::provider::provider_for_model(model);
 
         let session_id = session_id.unwrap_or_else(simple_id);
@@ -184,6 +216,9 @@ impl AgentLoop {
                     let _ = s.create_session(&session_id, model, Some(session_title.as_str()));
                 }
             }
+            // Record the working mode (never touches updated_at, so mode
+            // switches don't reorder session lists).
+            let _ = s.set_session_mode(&session_id, &self.mode);
         }
 
         let ctx = assemble_context(prompt);
@@ -462,7 +497,8 @@ impl AgentLoop {
             };
 
             tracing::info!(
-                "AgentLoop turn {turn} model={model} msg_len={} depth={depth}",
+                "AgentLoop turn {turn} model={model} mode={} msg_len={} depth={depth}",
+                self.mode,
                 messages.len()
             );
 
@@ -706,94 +742,108 @@ impl AgentLoop {
                     tracing::warn!("dangerous bash downgraded to ask: {args_str}");
                     decision = Decision::Ask;
                 }
-                let result = match decision {
-                    Decision::Deny => {
-                        json!({"ok": false, "error": format!("FILE NOT CREATED: tool {name} denied by policy (pattern matched deny). args={args_str}")})
-                    }
-                    Decision::Ask => {
-                        let is_write_allowed_path = if name == "write" || name == "edit" {
-                            if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
-                                let resolved = crate::tools::viora::resolve_path(p);
-                                crate::tools::viora::is_within_root(&resolved)
+                // Restrictive modes: the model only sees mode tools, but a
+                // hallucinated call for anything else must fail closed here
+                // rather than execute (defense in depth behind the registry
+                // filter). Base permissions still apply to mode tools.
+                let in_mode = self.registry.all().iter().any(|t| t.name == name);
+                let result = if !in_mode {
+                    json!({"ok": false, "error": format!("tool {name} is not available in mode '{}' (switch with /mode or --mode). args={args_str}", self.mode)})
+                } else {
+                    match decision {
+                        Decision::Deny => {
+                            json!({"ok": false, "error": format!("FILE NOT CREATED: tool {name} denied by policy (pattern matched deny). args={args_str}")})
+                        }
+                        Decision::Ask => {
+                            let is_write_allowed_path = if name == "write" || name == "edit" {
+                                if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
+                                    let resolved = crate::tools::viora::resolve_path(p);
+                                    crate::tools::viora::is_within_root(&resolved)
+                                } else {
+                                    false
+                                }
+                            } else if name == "apply_patch" {
+                                args_val
+                                    .get("patch")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|text| crate::tools::patch::parse_patch(text).ok())
+                                    .map(|ops| {
+                                        let paths = crate::tools::patch::touched_paths(&ops);
+                                        !paths.is_empty()
+                                            && paths.iter().all(|p| {
+                                                let rp = crate::tools::viora::resolve_path(p);
+                                                crate::tools::viora::is_within_root(&rp)
+                                                    || p.starts_with("/tmp/")
+                                            })
+                                    })
+                                    .unwrap_or(false)
                             } else {
                                 false
-                            }
-                        } else if name == "apply_patch" {
-                            args_val
-                                .get("patch")
-                                .and_then(|v| v.as_str())
-                                .and_then(|text| crate::tools::patch::parse_patch(text).ok())
-                                .map(|ops| {
-                                    let paths = crate::tools::patch::touched_paths(&ops);
-                                    !paths.is_empty()
-                                        && paths.iter().all(|p| {
-                                            let rp = crate::tools::viora::resolve_path(p);
-                                            crate::tools::viora::is_within_root(&rp)
-                                                || p.starts_with("/tmp/")
-                                        })
-                                })
-                                .unwrap_or(false)
-                        } else {
-                            false
-                        };
-                        let is_tmp_write = name == "write" && args_str.contains("/tmp/");
+                            };
+                            let is_tmp_write = name == "write" && args_str.contains("/tmp/");
 
-                        let auto_allow = auto_allow_on();
-                        if auto_allow {
-                            tracing::warn!(
-                                "auto-allow: executing {name} (VIORAHARNESS_AUTO_ALLOW)"
-                            );
-                        }
-                        if is_read_only_tool(&name)
-                            || (name == "bash" && is_safe_bash(&args_str))
-                            || is_tmp_write
-                            || is_write_allowed_path
-                            || auto_allow
-                        {
-                            if name == "task" && depth >= 2 {
-                                json!({"ok": false, "error": "task recursion depth exceeded (max 2)"})
-                            } else {
-                                if name == "write" {
-                                    if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
-                                        let snap = crate::session::snapshot::UndoStack::new();
-                                        let seq = turn_seq;
-                                        snap.push(&session_id, seq, p).await;
-                                    }
-                                }
-
-                                if auto_allow {
-                                    execute_approved(&name, args_val).await
-                                } else {
-                                    tools::execute_tool(&name, args_val).await
-                                }
+                            let auto_allow = auto_allow_on();
+                            if auto_allow {
+                                tracing::warn!(
+                                    "auto-allow: executing {name} (VIORAHARNESS_AUTO_ALLOW)"
+                                );
                             }
-                        } else {
-                            let interactive_result: Option<Value> = if std::env::var(
-                                "VIORAHARNESS_TUI",
-                            )
-                            .is_ok()
+                            if is_read_only_tool(&name)
+                                || (name == "bash" && is_safe_bash(&args_str))
+                                || is_tmp_write
+                                || is_write_allowed_path
+                                || auto_allow
                             {
-                                if let Some(sender) = crate::permissions::get_interactive_sender() {
-                                    let (tx, rx) = tokio::sync::oneshot::channel();
-                                    let ask = crate::permissions::InteractiveAsk {
-                                        id: id.clone(),
-                                        tool: name.clone(),
-                                        args: args_str.clone(),
-                                        tx,
-                                    };
-
-                                    if let Some(s_tx) = &stream_tx {
-                                        let _ = s_tx
-                                            .send(crate::provider::ProviderEvent::ToolCallDelta {
-                                                id: id.clone(),
-                                                name: format!("{} (permission ask)", name),
-                                                args: args_str.clone(),
-                                                thought_signature: None,
-                                            })
-                                            .await;
+                                if name == "task" && depth >= 2 {
+                                    json!({"ok": false, "error": "task recursion depth exceeded (max 2)"})
+                                } else {
+                                    if name == "write" {
+                                        if let Some(p) =
+                                            args_val.get("path").and_then(|v| v.as_str())
+                                        {
+                                            let snap = crate::session::snapshot::UndoStack::new();
+                                            let seq = turn_seq;
+                                            snap.push(&session_id, seq, p).await;
+                                        }
                                     }
-                                    if sender.send(ask).await.is_ok() {
-                                        match rx.await {
+
+                                    if auto_allow {
+                                        execute_approved(&name, args_val).await
+                                    } else {
+                                        tools::execute_tool(&name, args_val).await
+                                    }
+                                }
+                            } else {
+                                let interactive_result: Option<Value> = if std::env::var(
+                                    "VIORAHARNESS_TUI",
+                                )
+                                .is_ok()
+                                {
+                                    if let Some(sender) =
+                                        crate::permissions::get_interactive_sender()
+                                    {
+                                        let (tx, rx) = tokio::sync::oneshot::channel();
+                                        let ask = crate::permissions::InteractiveAsk {
+                                            id: id.clone(),
+                                            tool: name.clone(),
+                                            args: args_str.clone(),
+                                            tx,
+                                        };
+
+                                        if let Some(s_tx) = &stream_tx {
+                                            let _ = s_tx
+                                                .send(
+                                                    crate::provider::ProviderEvent::ToolCallDelta {
+                                                        id: id.clone(),
+                                                        name: format!("{} (permission ask)", name),
+                                                        args: args_str.clone(),
+                                                        thought_signature: None,
+                                                    },
+                                                )
+                                                .await;
+                                        }
+                                        if sender.send(ask).await.is_ok() {
+                                            match rx.await {
                                             Ok(crate::permissions::InteractiveDecision::AllowOnce) => {
                                                 if name == "write" {
                                                     if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
@@ -823,35 +873,36 @@ impl AgentLoop {
                                             }
                                             Err(_) => None,
                                         }
+                                        } else {
+                                            None
+                                        }
                                     } else {
                                         None
                                     }
                                 } else {
                                     None
+                                };
+                                if let Some(v) = interactive_result {
+                                    v
+                                } else {
+                                    json!({"ok": false, "error": format!("FILE NOT CREATED: tool {name} blocked by permissions (ask). In TUI use the Allow once / Allow always dialog, headless rerun with -y, or add to vioraharness.json permissions allow. For ls prefer glob; for file content prefer read. args={args_str}")})
                                 }
-                            } else {
-                                None
-                            };
-                            if let Some(v) = interactive_result {
-                                v
-                            } else {
-                                json!({"ok": false, "error": format!("FILE NOT CREATED: tool {name} blocked by permissions (ask). In TUI use the Allow once / Allow always dialog, headless rerun with -y, or add to vioraharness.json permissions allow. For ls prefer glob; for file content prefer read. args={args_str}")})
                             }
                         }
-                    }
-                    Decision::Allow => {
-                        if name == "task" && depth >= 2 {
-                            json!({"ok": false, "error": "task recursion depth exceeded (max 2)"})
-                        } else {
-                            if name == "write" {
-                                if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
-                                    let snap = crate::session::snapshot::UndoStack::new();
+                        Decision::Allow => {
+                            if name == "task" && depth >= 2 {
+                                json!({"ok": false, "error": "task recursion depth exceeded (max 2)"})
+                            } else {
+                                if name == "write" {
+                                    if let Some(p) = args_val.get("path").and_then(|v| v.as_str()) {
+                                        let snap = crate::session::snapshot::UndoStack::new();
 
-                                    let seq = turn_seq;
-                                    snap.push(&session_id, seq, p).await;
+                                        let seq = turn_seq;
+                                        snap.push(&session_id, seq, p).await;
+                                    }
                                 }
+                                tools::execute_tool(&name, args_val).await
                             }
-                            tools::execute_tool(&name, args_val).await
                         }
                     }
                 };
@@ -1405,6 +1456,21 @@ mod tests {
         ] {
             assert!(!is_dangerous_bash(&bash_args(cmd)), "safe: {cmd}");
         }
+    }
+
+    #[test]
+    fn with_mode_scopes_registry() {
+        let web = AgentLoop::with_mode("web");
+        assert_eq!(web.mode, "web");
+        let names: Vec<&str> = web.registry.all().iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"browser_screenshot"));
+        assert!(!names.contains(&"netlist_run"), "web hides EDA tools");
+        assert!(!names.contains(&"pcb_compose"), "web hides EDA tools");
+        let eda = AgentLoop::with_mode("eda");
+        assert_eq!(eda.mode, "eda");
+        assert_eq!(eda.registry.all().len(), ToolRegistry::new().all().len());
+        let unknown = AgentLoop::with_mode("nope");
+        assert_eq!(unknown.mode, "eda", "unknown falls back");
     }
 
     #[test]

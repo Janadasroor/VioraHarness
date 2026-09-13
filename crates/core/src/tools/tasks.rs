@@ -27,6 +27,9 @@ pub struct BgTask {
     pub id: String,
     pub command: String,
     pub cwd: String,
+    /// Agent mode that spawned the task (origin tag — kept for the task's
+    /// lifetime so mode switches never orphan or misattribute it).
+    pub mode: String,
     pub status: BgStatus,
     pub exit_code: Option<i32>,
     pub log_path: String,
@@ -116,6 +119,7 @@ pub fn spawn_task(command: &str, cwd: &str) -> BgTask {
         id: id.clone(),
         command: command.to_string(),
         cwd: cwd.to_string(),
+        mode: crate::mode::ModeGuard::current(),
         status: BgStatus::Running,
         exit_code: None,
         log_path: log_path.clone(),
@@ -262,8 +266,9 @@ pub fn launch_result(task: &BgTask) -> Value {
         "background": true,
         "task_id": task.id,
         "status": task.status.as_str(),
+        "mode": task.mode,
         "log": task.log_path,
-        "note": format!("detached task {} running — result will NOT return here; check /tasks (or poll the log) for completion, then read/grep the log", task.id),
+        "note": format!("detached task {} running in mode '{}' — result will NOT return here; check /tasks (or poll the log) for completion, then read/grep the log", task.id, task.mode),
     })
 }
 
@@ -283,6 +288,22 @@ mod tests {
                 panic!("task {id} still running after {timeout_ms}ms");
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn spawn_tags_origin_mode() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var(crate::mode::MODE_ENV_VAR).ok();
+        std::env::set_var(crate::mode::MODE_ENV_VAR, "web");
+        let t = spawn_task("true", "/tmp");
+        let done = wait_for(&t.id, 5000).await;
+        assert_eq!(done.mode, "web", "task keeps its origin mode");
+        assert_eq!(launch_result(&done)["mode"], "web");
+        match prev {
+            Some(v) => std::env::set_var(crate::mode::MODE_ENV_VAR, v),
+            None => std::env::remove_var(crate::mode::MODE_ENV_VAR),
         }
     }
 

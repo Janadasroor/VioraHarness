@@ -108,7 +108,8 @@ impl App {
         self.stream_rx = Some(rx);
         // The loop is built here (not inside the task) so its `$`
         // instant-prompt handle can be shared with the UI while it runs.
-        let loop_ = vioraharness_core::loop_mod::AgentLoop::new();
+        // Mode-scoped: the model only sees the active mode's tools.
+        let loop_ = vioraharness_core::loop_mod::AgentLoop::with_mode(&self.agent_mode);
         self.instant_injector = Some(loop_.injector.clone());
         self.turn_session = Some(session_id.clone());
         let handle = tokio::spawn(async move {

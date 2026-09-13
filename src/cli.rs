@@ -15,6 +15,9 @@ pub(crate) struct Cli {
     #[arg(long, env = "VIORAHARNESS_MODEL")]
     pub(crate) model: Option<String>,
 
+    #[arg(long, env = "VIORAHARNESS_MODE")]
+    pub(crate) mode: Option<String>,
+
     #[arg(long)]
     pub(crate) config: Option<String>,
 
@@ -51,6 +54,9 @@ pub(crate) enum Commands {
         #[arg(long)]
         model: Option<String>,
 
+        #[arg(long, env = "VIORAHARNESS_MODE")]
+        mode: Option<String>,
+
         #[arg(long, alias = "session-id", alias = "sid")]
         session: Option<String>,
 
@@ -65,6 +71,8 @@ pub(crate) enum Commands {
         prompt: String,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long, env = "VIORAHARNESS_MODE")]
+        mode: Option<String>,
         #[arg(long)]
         session: Option<String>,
 

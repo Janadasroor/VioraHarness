@@ -54,6 +54,60 @@ impl App {
             "/skills" | "/skill" => {
                 self.popup = Popup::Skills;
             }
+            "/mode" | "/modes" => {
+                use vioraharness_core::mode as agent_modes;
+                if parts.len() > 1 {
+                    let name = agent_modes::normalize_mode_name(parts[1]);
+                    if !agent_modes::is_known_mode(&name) {
+                        let known: Vec<&str> = agent_modes::builtin_modes()
+                            .iter()
+                            .map(|m| m.name)
+                            .collect();
+                        self.messages.push(Msg::new(
+                            "system",
+                            format!("unknown mode: {} (known: {})", parts[1], known.join(", ")),
+                        ));
+                    } else if name == self.agent_mode {
+                        self.messages
+                            .push(Msg::new("system", format!("already in {name} mode")));
+                    } else {
+                        self.agent_mode = name.clone();
+                        Self::save_tui_state(serde_json::json!({"last_mode": self.agent_mode}));
+                        // Foreign running tasks keep their origin mode and
+                        // keep running — surface them instead of orphaning.
+                        let foreign: Vec<String> = vioraharness_core::tools::tasks::list_tasks()
+                            .into_iter()
+                            .filter(|t| {
+                                t.status == vioraharness_core::tools::tasks::BgStatus::Running
+                                    && t.mode != self.agent_mode
+                            })
+                            .map(|t| format!("{} ({})", short_task_id(&t.id), t.mode))
+                            .collect();
+                        let tool_count = agent_modes::registry_for_mode(&name).all().len();
+                        let mut msg = format!(
+                            "mode → {name} ({tool_count} tools, saved). New turns use it; history stays."
+                        );
+                        if !foreign.is_empty() {
+                            msg.push_str(&format!(
+                                " Still running from other modes: {} — /tasks to inspect/kill.",
+                                foreign.join(", ")
+                            ));
+                        }
+                        self.messages.push(Msg::new("system", msg));
+                    }
+                } else {
+                    let mut lines = vec![format!("mode: {} (current)", self.agent_mode)];
+                    for m in agent_modes::builtin_modes() {
+                        let tools = agent_modes::registry_for_mode(m.name).all().len();
+                        lines.push(format!(
+                            "  {:<8} {tools:>3} tools — {}",
+                            m.name, m.description
+                        ));
+                    }
+                    lines.push("usage: /mode <name>".to_string());
+                    self.messages.push(Msg::new("system", lines.join("\n")));
+                }
+            }
             "/skill-new" | "/new-skill" | "/skill-create" => {
                 if self.busy {
                     self.messages.push(Msg::new(
@@ -292,6 +346,14 @@ impl App {
                         if let Ok(Some(sess)) = store.get_session(&real_id) {
                             self.session_id = real_id.clone();
                             self.model = sess.model.clone();
+                            // Restored session brings its working mode; a
+                            // stored mode always beats the saved default.
+                            if let Some(m) = sess.mode.clone() {
+                                let norm = vioraharness_core::mode::normalize_mode_name(&m);
+                                if vioraharness_core::mode::is_known_mode(&norm) {
+                                    self.agent_mode = norm;
+                                }
+                            }
                             if let Some(theme) = sess.theme.clone() {
                                 Self::save_tui_state(serde_json::json!({"last_theme": theme}));
                             }

@@ -76,6 +76,15 @@ async fn main() -> anyhow::Result<()> {
     match cli.command.unwrap_or(Commands::Tui { model: None }) {
         Commands::Tui { model } => {
             let m = model.or(cli.model);
+            // Explicit --mode wins over the saved TUI default: seed the env
+            // chain before App::new resolves (saved last_mode < --mode).
+            if let Some(ref md) = cli.mode {
+                if !vioraharness_core::mode::is_known_mode(md) {
+                    eprintln!("unknown mode: {md} (known: eda, web) — see /mode in the TUI");
+                    std::process::exit(2);
+                }
+                std::env::set_var(vioraharness_core::mode::MODE_ENV_VAR, md);
+            }
             let sid = vioraharness_tui::run(m).await?;
             let cwd = std::env::current_dir()
                 .map(|p| p.display().to_string())
@@ -149,17 +158,41 @@ async fn main() -> anyhow::Result<()> {
         Commands::Run {
             prompt,
             model,
+            mode,
             session,
             cont,
             yes,
-        } => cmd_run(prompt, model, session, cont, yes, cli.model).await?,
+        } => {
+            cmd_run(
+                prompt,
+                model,
+                session,
+                cont,
+                yes,
+                cli.model,
+                mode.or(cli.mode),
+            )
+            .await?
+        }
         Commands::Exec {
             prompt,
             model,
+            mode,
             session,
             cont,
             yes,
-        } => cmd_run(prompt, model, session, cont, yes, cli.model).await?,
+        } => {
+            cmd_run(
+                prompt,
+                model,
+                session,
+                cont,
+                yes,
+                cli.model,
+                mode.or(cli.mode),
+            )
+            .await?
+        }
         Commands::Doctor => cmd::doctor::cmd_doctor(cli.config).await?,
         Commands::Gc { days, dry_run } => cmd::manage::cmd_gc(days, dry_run)?,
         Commands::RunLoop {

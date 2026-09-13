@@ -563,6 +563,11 @@ pub(crate) async fn cmd_doctor(config: Option<String>) -> anyhow::Result<()> {
             }
         );
     }
+    let (mode, mode_src) = vioraharness_core::mode::resolve_mode_with_source(None);
+    let mode_tools = vioraharness_core::mode::registry_for_mode(&mode)
+        .all()
+        .len();
+    println!("  mode: {mode} (from {mode_src}, {mode_tools} tools) — override with --mode <name> or /mode");
     let db = std::env::var("VIORAHARNESS_DB")
         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
     println!("  db: {db}");

@@ -718,6 +718,10 @@ impl App {
                         Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(
+                        format!("{:<6}", "MODE"),
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
                         "COMMAND",
                         Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD),
                     ),
@@ -780,7 +784,7 @@ impl App {
 
 
 
-                    let cmd_cap = (inner.width as usize).saturating_sub(42).max(12);
+                    let cmd_cap = (inner.width as usize).saturating_sub(49).max(12);
                     let cmd_raw =
                         t.command.split_whitespace().collect::<Vec<_>>().join(" ");
                     let cmd = if cmd_raw.chars().count() > cmd_cap {
@@ -800,6 +804,10 @@ impl App {
                         Span::styled(
                             format!("{status_word:<9}"),
                             Style::default().fg(col),
+                        ),
+                        Span::styled(
+                            format!("{:<6}", t.mode),
+                            Style::default().fg(Color::DarkGray),
                         ),
                         Span::styled(
                             format!("{cmd:<cmd_cap$}"),

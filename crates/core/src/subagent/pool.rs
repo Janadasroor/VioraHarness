@@ -54,6 +54,15 @@ impl SubagentKind {
     }
 }
 
+/// Parent mode's tool allowlist from the current turn (`None` = full
+/// access). Read at spawn time so `task` calls inside a mode stay inside it.
+fn parent_mode_allow() -> Option<Vec<String>> {
+    let mode = crate::mode::ModeGuard::current();
+    crate::mode::find_mode(&mode)
+        .and_then(|m| m.tools)
+        .map(|ts| ts.iter().map(|t| t.to_string()).collect())
+}
+
 pub struct SubagentPool {
     sem: Arc<Semaphore>,
 }
@@ -71,29 +80,49 @@ impl SubagentPool {
         prompt: String,
         model_override: Option<String>,
     ) -> anyhow::Result<String> {
+        self.spawn_one_scoped(kind, prompt, model_override, parent_mode_allow())
+            .await
+    }
+
+    /// Spawn with an explicit parent-mode allowlist (`None` = full access).
+    /// The effective list is always kind ∩ parent: a subagent can never
+    /// see tools its parent mode hides (no escape hatch across modes).
+    pub async fn spawn_one_scoped(
+        &self,
+        kind: SubagentKind,
+        prompt: String,
+        model_override: Option<String>,
+        parent_allow: Option<Vec<String>>,
+    ) -> anyhow::Result<String> {
         let _permit = self.sem.acquire().await?;
         let model = match model_override {
             Some(m) => m,
             None => kind.default_model_dynamic().await?,
         };
-        let registry = if let Some(allow) = kind.allowed_tools() {
-            let full = ToolRegistry::new();
-            let filtered: Vec<_> = full
-                .all()
-                .iter()
-                .filter(|t| allow.contains(&t.name))
-                .cloned()
-                .collect();
-            let mut r = ToolRegistry::new_empty();
-            for t in filtered {
-                r.add_tool(t);
+        let effective =
+            crate::mode::intersect_tools(kind.allowed_tools().as_deref(), parent_allow.as_deref());
+        let registry = match effective {
+            None => ToolRegistry::new(),
+            Some(allow) => {
+                let full = ToolRegistry::new();
+                let filtered: Vec<_> = full
+                    .all()
+                    .iter()
+                    .filter(|t| allow.contains(&t.name))
+                    .cloned()
+                    .collect();
+                let mut r = ToolRegistry::new_empty();
+                for t in filtered {
+                    r.add_tool(t);
+                }
+                r
             }
-            r
-        } else {
-            ToolRegistry::new()
         };
 
-        let loop_ = AgentLoop::with_registry(registry);
+        let mut loop_ = AgentLoop::with_registry(registry);
+        // Label the subagent loop with the parent mode so its turns tag
+        // tasks/artifacts consistently (registry already intersected).
+        loop_.mode = crate::mode::ModeGuard::current();
 
         let full_prompt = format!("{}\n\nTask: {}", kind.system_extra(), prompt);
         loop_.run(&full_prompt, &model, None).await
@@ -103,32 +132,44 @@ impl SubagentPool {
         &self,
         jobs: Vec<(SubagentKind, String)>,
     ) -> Vec<anyhow::Result<String>> {
+        // Capture the parent mode once: concurrent turns may hold
+        // different mode guards, so jobs must not re-read it later.
+        let parent_allow = parent_mode_allow();
+        let parent_mode = crate::mode::ModeGuard::current();
         let mut handles = Vec::new();
         for (kind, prompt) in jobs {
             let sem = self.sem.clone();
+            let parent_allow = parent_allow.clone();
+            let parent_mode = parent_mode.clone();
             handles.push(tokio::spawn(async move {
                 let _permit = sem.acquire_owned().await.unwrap();
                 let model = match kind.default_model_dynamic().await {
                     Ok(m) => m,
                     Err(e) => return Err(e),
                 };
-                let registry = if let Some(allow) = kind.allowed_tools() {
-                    let full = ToolRegistry::new();
-                    let filtered: Vec<_> = full
-                        .all()
-                        .iter()
-                        .filter(|t| allow.contains(&t.name))
-                        .cloned()
-                        .collect();
-                    let mut r = ToolRegistry::new_empty();
-                    for t in filtered {
-                        r.add_tool(t);
+                let effective = crate::mode::intersect_tools(
+                    kind.allowed_tools().as_deref(),
+                    parent_allow.as_deref(),
+                );
+                let registry = match effective {
+                    None => ToolRegistry::new(),
+                    Some(allow) => {
+                        let full = ToolRegistry::new();
+                        let filtered: Vec<_> = full
+                            .all()
+                            .iter()
+                            .filter(|t| allow.contains(&t.name))
+                            .cloned()
+                            .collect();
+                        let mut r = ToolRegistry::new_empty();
+                        for t in filtered {
+                            r.add_tool(t);
+                        }
+                        r
                     }
-                    r
-                } else {
-                    ToolRegistry::new()
                 };
-                let loop_ = AgentLoop::with_registry(registry);
+                let mut loop_ = AgentLoop::with_registry(registry);
+                loop_.mode = parent_mode.clone();
                 let full_prompt = format!("{}\n\nTask: {}", kind.system_extra(), prompt);
                 loop_.run(&full_prompt, &model, None).await
             }));

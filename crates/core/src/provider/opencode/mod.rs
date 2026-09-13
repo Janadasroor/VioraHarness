@@ -169,7 +169,6 @@ mod tests {
     }
 
     /// Regression: the responses parser must be chunk-size invariant.
-
     fn event_signature(evs: &[crate::provider::ProviderEvent]) -> Vec<String> {
         evs.iter()
             .map(|e| match e {

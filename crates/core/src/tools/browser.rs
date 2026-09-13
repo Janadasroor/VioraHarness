@@ -275,17 +275,25 @@ pub async fn browser_screenshot(args: Value) -> Value {
     // Local targets with default out: also drop a copy at
     // ./screenshot-latest.png so web loops don't need a manual cp.
     // Best-effort — a copy failure never fails the screenshot.
+    // Namespaced per agent mode (screenshot-latest.web.png) so parallel
+    // modes never stomp each other's pointer; `eda` keeps the bare name.
     if out_defaulted && is_local_url(&url) {
+        let mode = crate::mode::ModeGuard::current();
+        let latest_name = if mode == crate::mode::DEFAULT_MODE {
+            "screenshot-latest.png".to_string()
+        } else {
+            format!("screenshot-latest.{mode}.png")
+        };
         let latest = std::env::current_dir()
             .unwrap_or_else(|_| PathBuf::from("/tmp"))
-            .join("screenshot-latest.png");
+            .join(&latest_name);
         match tokio::fs::copy(&out_path, &latest).await {
             Ok(_) => {
                 res["latest"] = json!(latest.to_string_lossy());
             }
             Err(e) => {
                 res["latest_error"] = json!(format!(
-                    "auto-copy to ./screenshot-latest.png failed: {e} (out kept at {out_cli})"
+                    "auto-copy to ./{latest_name} failed: {e} (out kept at {out_cli})"
                 ));
             }
         }
@@ -573,6 +581,47 @@ mod tests {
             Some(v) => std::env::set_var("VIORAHARNESS_APPROVED_CALL", v),
             None => std::env::remove_var("VIORAHARNESS_APPROVED_CALL"),
         }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn screenshot_and_dom_roundtrip_local_file() {
+        if find_chrome().is_none() {
+            return;
+        }
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_APPROVED_CALL").ok();
+        std::env::set_var("VIORAHARNESS_APPROVED_CALL", "1");
+        let dir = std::env::temp_dir().join(format!("vh-webmode-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let html = dir.join("index.html");
+        std::fs::write(
+            &html,
+            "<html><body><h1>MODE-WEB-GOLDEN-42</h1></body></html>",
+        )
+        .unwrap();
+        let out = dir.join("shot.png");
+        let r = browser_screenshot(
+            json!({"target": html.to_string_lossy(), "out": out.to_string_lossy(), "width": 800, "height": 600, "delay_ms": 500}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert!(r["bytes"].as_u64().unwrap_or(0) > 1000, "real PNG: {r}");
+        assert!(out.exists(), "out written");
+        let d = browser_dom(json!({"target": html.to_string_lossy()})).await;
+        assert_eq!(d["ok"], true, "{d}");
+        assert!(
+            d["text"]
+                .as_str()
+                .unwrap_or("")
+                .contains("MODE-WEB-GOLDEN-42"),
+            "rendered DOM text: {d}"
+        );
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_APPROVED_CALL", v),
+            None => std::env::remove_var("VIORAHARNESS_APPROVED_CALL"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

@@ -80,6 +80,10 @@ impl App {
         let mut header_spans = vec![
             Span::styled(" VioraHarness ", Theme::header_title()),
             Span::styled(format!("[{}] ", self.mode.to_uppercase()), mode_style),
+            Span::styled(
+                format!("{{ {} }} ", self.agent_mode),
+                Style::default().fg(Color::DarkGray),
+            ),
         ];
         if let Some((label, style)) = busy_button {
             header_spans.push(Span::styled(label, style));

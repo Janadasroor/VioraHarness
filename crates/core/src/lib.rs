@@ -2,6 +2,7 @@ pub mod context;
 #[path = "loop/mod.rs"]
 pub mod loop_mod;
 pub mod mcp;
+pub mod mode;
 pub mod observe;
 pub mod permissions;
 pub mod provider;

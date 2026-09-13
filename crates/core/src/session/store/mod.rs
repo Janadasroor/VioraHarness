@@ -23,6 +23,7 @@ pub struct StoredSession {
     pub archived_at: Option<i64>,
     pub model_last: Option<String>,
     pub theme: Option<String>,
+    pub mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,6 +320,32 @@ mod tests {
 
     fn mem_store() -> SessionStore {
         SessionStore::new_in_memory().expect("in-memory store")
+    }
+
+    #[test]
+    fn session_mode_roundtrips_and_forks() {
+        let s = mem_store();
+        s.create_session("m1", "m", Some("t")).unwrap();
+        assert_eq!(s.get_session("m1").unwrap().unwrap().mode, None);
+        s.set_session_mode("m1", "web").unwrap();
+        assert_eq!(
+            s.get_session("m1").unwrap().unwrap().mode.as_deref(),
+            Some("web")
+        );
+        // Mode switches never reorder lists (updated_at untouched).
+        let before = s.get_session("m1").unwrap().unwrap().updated_at;
+        s.set_session_mode("m1", "eda").unwrap();
+        assert_eq!(s.get_session("m1").unwrap().unwrap().updated_at, before);
+        s.fork_session("m1", "m2", None).unwrap();
+        assert_eq!(
+            s.get_session("m2").unwrap().unwrap().mode.as_deref(),
+            Some("eda"),
+            "fork inherits parent mode"
+        );
+        let listed = s.list_sessions().unwrap();
+        assert!(listed
+            .iter()
+            .any(|x| x.id == "m1" && x.mode.as_deref() == Some("eda")));
     }
 
     #[test]

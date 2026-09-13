@@ -302,6 +302,10 @@ impl InputState {
                 "switch model — /model <name> or /model for picker",
             ),
             (
+                "/mode",
+                "switch agent mode — /mode <eda|web> (tool allowlist)",
+            ),
+            (
                 "/theme",
                 "switch theme — /theme <name> or /theme for picker",
             ),

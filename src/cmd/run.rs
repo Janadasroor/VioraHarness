@@ -7,9 +7,16 @@ pub(crate) async fn cmd_run(
     cont: bool,
     yes: bool,
     cli_model: Option<String>,
+    cli_mode: Option<String>,
 ) -> anyhow::Result<()> {
     if yes {
         std::env::set_var("VIORAHARNESS_AUTO_ALLOW", "1");
+    }
+    if let Some(ref md) = cli_mode {
+        if !vioraharness_core::mode::is_known_mode(md) {
+            eprintln!("unknown mode: {md} (known: eda, web) — see /mode in the TUI");
+            std::process::exit(2);
+        }
     }
     let m = model
         .or(cli_model)
@@ -31,8 +38,25 @@ pub(crate) async fn cmd_run(
                 & 0xffffffffff
         )
     });
+    // Mode precedence: --mode/VIORAHARNESS_MODE > resumed session's stored
+    // mode > project activeMode > eda.
+    let mode = match cli_mode {
+        Some(md) => vioraharness_core::mode::normalize_mode_name(&md),
+        None => {
+            let stored = std::env::var("VIORAHARNESS_DB")
+                .ok()
+                .and_then(|db| {
+                    vioraharness_core::session::SessionStore::new(&db)
+                        .ok()
+                        .and_then(|s| s.get_session(&sid).ok().flatten())
+                        .and_then(|sess| sess.mode)
+                })
+                .filter(|mm| vioraharness_core::mode::is_known_mode(mm));
+            stored.unwrap_or_else(|| vioraharness_core::mode::resolve_mode(None))
+        }
+    };
     println!(
-        "VioraHarness run [{m}] session={}  •  cwd: {}{}",
+        "VioraHarness run [{m}] mode={mode} session={}  •  cwd: {}{}",
         sid,
         std::env::current_dir()
             .map(|p| p.display().to_string())
@@ -40,7 +64,7 @@ pub(crate) async fn cmd_run(
         if yes { "  •  auto-allow ON" } else { "" },
     );
     println!("Prompt: {prompt}\n--- streaming ---\n");
-    let loop_ = vioraharness_core::loop_mod::AgentLoop::new();
+    let loop_ = vioraharness_core::loop_mod::AgentLoop::with_mode(&mode);
     let (tx, mut rx) =
         tokio::sync::mpsc::channel::<vioraharness_core::provider::ProviderEvent>(256);
 

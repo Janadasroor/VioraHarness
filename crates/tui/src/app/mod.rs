@@ -93,6 +93,11 @@ pub struct App {
 
     pub(crate) mode: String,
 
+    /// Agent working mode (`eda` = full tools, `web` = web-dev subset).
+    /// Distinct from `mode` (plan/build input toggle). Persisted as
+    /// `last_mode` in tui_state.json; per-session value wins on /resume.
+    pub(crate) agent_mode: String,
+
     pub(crate) last_diff: Option<String>,
 
     pub(crate) pending_perm: Option<vioraharness_core::permissions::InteractiveAsk>,
@@ -1281,6 +1286,15 @@ impl App {
 
         let initial_models = Self::fetch_models_from_openrouter();
 
+        // Agent mode: saved TUI choice wins (validated), else the standard
+        // chain (env > project config > eda).
+        let agent_mode = state
+            .get("last_mode")
+            .and_then(|v| v.as_str())
+            .map(|m| m.to_string())
+            .filter(|m| vioraharness_core::mode::is_known_mode(m))
+            .unwrap_or_else(|| vioraharness_core::mode::resolve_mode(None));
+
         let (perm_tx, perm_rx) = tokio::sync::mpsc::channel(8);
         vioraharness_core::permissions::set_interactive_sender(perm_tx);
 
@@ -1348,6 +1362,7 @@ impl App {
             expanded_messages: HashSet::new(),
             model_context: std::collections::HashMap::new(),
             mode: "build".into(),
+            agent_mode,
             last_diff: None,
             pending_perm: None,
             perm_cursor: 0,

@@ -113,6 +113,8 @@ impl App {
                 | "/auth"
                 | "/keys"
                 | "/model"
+                | "/mode"
+                | "/modes"
                 | "/skills"
                 | "/skill"
                 | "/theme"
@@ -330,6 +332,8 @@ impl App {
                 | "/delete"
                 | "/export"
                 | "/model"
+                | "/mode"
+                | "/modes"
                 | "/skills"
                 | "/skill"
                 | "/skill-new"
@@ -961,6 +965,7 @@ mod tests {
             "/delete",
             "/export",
             "/model",
+            "/mode",
             "/skills",
             "/skill-new",
             "/theme",
@@ -995,6 +1000,46 @@ mod tests {
         ] {
             assert!(!App::is_known_slash(prompt), "{prompt:?} sends as prompt");
         }
+    }
+
+    #[test]
+    fn mode_command_switches_lists_and_rejects() {
+        let mut app = test_app();
+        app.agent_mode = "eda".to_string();
+        app.handle_slash("/mode web");
+        assert_eq!(app.agent_mode, "web");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("mode → web")),
+            "switch confirmed in chat"
+        );
+        app.handle_slash("/mode web");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("already in web")),
+            "idempotent re-select"
+        );
+        app.handle_slash("/mode nope");
+        assert_eq!(app.agent_mode, "web", "unknown mode rejected");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("unknown mode")),
+            "rejection explained"
+        );
+        app.handle_slash("/mode");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("usage: /mode")),
+            "bare /mode lists modes"
+        );
+        assert!(
+            App::is_busy_safe_slash("/mode web"),
+            "/mode runs while busy"
+        );
     }
 
     fn rewind_test_session(

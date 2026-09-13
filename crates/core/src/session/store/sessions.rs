@@ -99,8 +99,9 @@ impl SessionStore {
         let conn = self.pool.get()?;
 
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN theme TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT", []);
         let mut stmt = conn.prepare(
-            "SELECT id, created_at, COALESCE(updated_at, created_at), model, status, title, cwd, project_hash, parent_id, archived_at, model_last, theme FROM sessions WHERE id = ?1",
+            "SELECT id, created_at, COALESCE(updated_at, created_at), model, status, title, cwd, project_hash, parent_id, archived_at, model_last, theme, mode FROM sessions WHERE id = ?1",
         )?;
         let res = stmt
             .query_row(params![id], |r| {
@@ -117,10 +118,24 @@ impl SessionStore {
                     archived_at: r.get(9)?,
                     model_last: r.get(10)?,
                     theme: r.get::<_, Option<String>>(11)?,
+                    mode: r.get::<_, Option<String>>(12).unwrap_or(None),
                 })
             })
             .optional()?;
         Ok(res)
+    }
+
+    /// Record the agent mode a session is working in (defaults to `eda`
+    /// when never set). Updated per turn; does not touch `updated_at` so
+    /// mode switches never reorder session lists.
+    pub fn set_session_mode(&self, id: &str, mode: &str) -> Result<()> {
+        let conn = self.pool.get()?;
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT", []);
+        conn.execute(
+            "UPDATE sessions SET mode = ?2 WHERE id = ?1",
+            params![id, mode],
+        )?;
+        Ok(())
     }
 
     pub fn touch_session(&self, id: &str, model_last: Option<&str>) -> Result<()> {
@@ -263,9 +278,10 @@ impl SessionStore {
             "fork of {}",
             &parent_id[..8.min(parent_id.len())]
         )));
+        let _ = tx.execute("ALTER TABLE sessions ADD COLUMN mode TEXT", []);
         tx.execute(
-            "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, model, status, title, cwd, project_hash, parent_id, fork_seq, model_last, theme) VALUES (?1, ?2, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?3, ?9)",
-            params![new_id, now, parent.model, title, parent.cwd, parent.project_hash, parent_id, at_seq, parent.theme],
+            "INSERT OR IGNORE INTO sessions (id, created_at, updated_at, model, status, title, cwd, project_hash, parent_id, fork_seq, model_last, theme, mode) VALUES (?1, ?2, ?2, ?3, 'active', ?4, ?5, ?6, ?7, ?8, ?3, ?9, ?10)",
+            params![new_id, now, parent.model, title, parent.cwd, parent.project_hash, parent_id, at_seq, parent.theme, parent.mode],
         )?;
 
         if let Some(seq) = at_seq {

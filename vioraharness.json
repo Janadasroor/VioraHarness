@@ -129,6 +129,7 @@
     }
   },
   "sandbox": "strict",
+  "activeMode": "eda",
   "session": {
     "dbPath": "~/.local/share/vioraharness/sessions.db",
     "tracesDir": "~/.local/share/vioraharness/traces"

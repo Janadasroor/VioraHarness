@@ -51,9 +51,10 @@ impl SessionStore {
     ) -> Result<Vec<StoredSession>> {
         let conn = self.pool.get()?;
         let _ = conn.execute("ALTER TABLE sessions ADD COLUMN theme TEXT", []);
+        let _ = conn.execute("ALTER TABLE sessions ADD COLUMN mode TEXT", []);
 
         let mut sql = String::from(
-            "SELECT id, created_at, COALESCE(updated_at, created_at), model, status, title, cwd, project_hash, parent_id, archived_at, model_last, theme FROM sessions WHERE 1=1",
+            "SELECT id, created_at, COALESCE(updated_at, created_at), model, status, title, cwd, project_hash, parent_id, archived_at, model_last, theme, mode FROM sessions WHERE 1=1",
         );
         if !include_archived {
             sql.push_str(" AND archived_at IS NULL");
@@ -85,6 +86,7 @@ impl SessionStore {
                 archived_at: r.get(9)?,
                 model_last: r.get(10)?,
                 theme: r.get::<_, Option<String>>(11)?,
+                mode: r.get::<_, Option<String>>(12).unwrap_or(None),
             })
         };
         let iter: Box<dyn Iterator<Item = rusqlite::Result<StoredSession>>> = match (project, sl) {

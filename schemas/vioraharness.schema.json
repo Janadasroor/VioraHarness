@@ -29,6 +29,11 @@
       "additionalProperties": { "$ref": "#/definitions/providerEntry" }
     },
     "sandbox": { "type": "string", "enum": ["strict", "relaxed", "off"] },
+    "activeMode": {
+      "type": "string",
+      "enum": ["eda", "web"],
+      "description": "Default agent mode (tool allowlist). Overridden by --mode / VIORAHARNESS_MODE / session mode."
+    },
     "session": {
       "type": "object",
       "properties": {

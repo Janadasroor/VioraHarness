@@ -53,6 +53,11 @@ struct PromptReq {
     #[serde(default)]
     model: Option<String>,
 
+    /// Agent mode for this turn (`eda` default). Unknown values are 400.
+    /// Omitted → the session's stored mode → project default → `eda`.
+    #[serde(default)]
+    mode: Option<String>,
+
     #[serde(default)]
     wait: bool,
 }
@@ -562,6 +567,7 @@ async fn run_turn_streaming(
     model: String,
     session_id: String,
     bus: broadcast::Sender<BusEvent>,
+    mode: String,
 ) -> Result<String, String> {
     use vioraharness_core::provider::ProviderEvent as E;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<E>(256);
@@ -594,7 +600,7 @@ async fn run_turn_streaming(
             }
         }
     });
-    let loop_ = vioraharness_core::loop_mod::AgentLoop::new();
+    let loop_ = vioraharness_core::loop_mod::AgentLoop::with_mode(&mode);
     let out = loop_
         .run_streaming(&prompt, &model, Some(session_id), tx)
         .await
@@ -644,14 +650,38 @@ async fn prompt_async(
     let prompt = req.prompt.clone();
     let session_id = id.clone();
     let bus = st.bus.clone();
+    // Mode precedence: request > stored session mode > default chain.
+    // Unknown request values fail closed (permissions fail-closed remotely).
+    let mode = match req.mode.clone().filter(|m| !m.trim().is_empty()) {
+        Some(m) => {
+            if !vioraharness_core::mode::is_known_mode(&m) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("unknown mode: {m} (known: eda, web)")})),
+                )
+                    .into_response();
+            }
+            vioraharness_core::mode::normalize_mode_name(&m)
+        }
+        None => {
+            let db = std::env::var("VIORAHARNESS_DB")
+                .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+            vioraharness_core::session::SessionStore::new(&db)
+                .ok()
+                .and_then(|s| s.get_session(&id).ok().flatten())
+                .and_then(|sess| sess.mode)
+                .filter(|mm| vioraharness_core::mode::is_known_mode(mm))
+                .unwrap_or_else(|| vioraharness_core::mode::resolve_mode(None))
+        }
+    };
 
     if req.wait {
         let _ = bus.send(BusEvent {
             session_id: session_id.clone(),
             event: "prompt.start".into(),
-            data: serde_json::json!({"prompt": prompt}),
+            data: serde_json::json!({"prompt": prompt, "mode": mode}),
         });
-        return match run_turn_streaming(prompt, model, session_id, bus.clone()).await {
+        return match run_turn_streaming(prompt, model, session_id, bus.clone(), mode).await {
             Ok(text) => {
                 let _ = bus.send(BusEvent {
                     session_id: id.clone(),
@@ -680,9 +710,9 @@ async fn prompt_async(
         let _ = bus.send(BusEvent {
             session_id: session_id.clone(),
             event: "prompt.start".into(),
-            data: serde_json::json!({"prompt": prompt}),
+            data: serde_json::json!({"prompt": prompt, "mode": mode}),
         });
-        match run_turn_streaming(prompt, model, session_id.clone(), bus.clone()).await {
+        match run_turn_streaming(prompt, model, session_id.clone(), bus.clone(), mode).await {
             Ok(text) => {
                 let _ = bus.send(BusEvent {
                     session_id: session_id.clone(),
@@ -794,6 +824,32 @@ mod tests {
         let r: PromptReq = serde_json::from_str(r#"{"prompt":"hi","wait":true}"#).unwrap();
         assert!(r.wait);
         assert!(r.model.is_none());
+        assert!(r.mode.is_none());
+        let r: PromptReq = serde_json::from_str(r#"{"prompt":"hi","mode":"web"}"#).unwrap();
+        assert_eq!(r.mode.as_deref(), Some("web"));
+    }
+
+    #[tokio::test]
+    async fn prompt_unknown_mode_is_400() {
+        let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (_dir, db) = temp_db();
+        std::env::set_var("VIORAHARNESS_DB", &db);
+        let st = test_state();
+        let resp = prompt_async(
+            Authed,
+            State(st),
+            Path("nope-missing".into()),
+            Json(PromptReq {
+                prompt: "hi".into(),
+                model: Some("m".into()),
+                mode: Some("nope".into()),
+                wait: true,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        std::env::remove_var("VIORAHARNESS_DB");
     }
 
     #[tokio::test]
@@ -863,6 +919,7 @@ mod tests {
             Json(PromptReq {
                 prompt: "hi".into(),
                 model: None,
+                mode: None,
                 wait: false,
             }),
         )

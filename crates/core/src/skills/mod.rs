@@ -207,6 +207,21 @@ pub fn load_triggered_skills(prompt: &str) -> Vec<Skill> {
     match_skills(prompt, &skills)
 }
 
+/// Intent-triggered skills gated to a mode's skill set: when `allowed` is
+/// `Some`, only skills named in it can trigger (a web session never
+/// inherits the PCB skill via keyword coincidence). `None` = unfiltered.
+pub fn load_triggered_skills_in_mode(prompt: &str, allowed: Option<&[&str]>) -> Vec<Skill> {
+    let skills = discover_skills();
+    let matched = match_skills(prompt, &skills);
+    match allowed {
+        None => matched,
+        Some(allow) => matched
+            .into_iter()
+            .filter(|s| allow.iter().any(|a| a.eq_ignore_ascii_case(&s.name)))
+            .collect(),
+    }
+}
+
 pub fn list_skills() -> Vec<Skill> {
     discover_skills()
 }
@@ -259,6 +274,7 @@ mod tests {
         assert!(names.contains(&"pcb"));
         assert!(names.contains(&"flux"));
         assert!(names.contains(&"erc"));
+        assert!(names.contains(&"web"));
     }
 
     #[test]
@@ -266,5 +282,20 @@ mod tests {
         let skills = discover_skills();
         let m = match_skills("I need to write flux script", &skills);
         assert!(m.iter().any(|s| s.name == "flux"));
+    }
+
+    #[test]
+    fn mode_gating_never_widens() {
+        let gated = load_triggered_skills_in_mode("fix the pcb board", Some(&["web"]));
+        assert!(
+            gated.iter().all(|s| s.name == "web"),
+            "only web skills pass a web gate: {:?}",
+            gated.iter().map(|s| &s.name).collect::<Vec<_>>()
+        );
+        let open = load_triggered_skills_in_mode("fix the pcb board", None);
+        assert!(
+            open.iter().any(|s| s.name == "pcb"),
+            "ungated still triggers pcb"
+        );
     }
 }
