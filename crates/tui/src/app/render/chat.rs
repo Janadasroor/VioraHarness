@@ -98,7 +98,10 @@ impl App {
                     all_lines.push(Line::from(line_spans));
                 } else {
                     let table_max_width = (area.width as usize).saturating_sub(4).max(20);
+                    let code_max = code_inner_max(area.width as usize);
+                    let fence_widths = fence_block_widths(&raw_lines, code_max);
                     let mut skip_until = 0;
+                    let mut code_inner = FENCE_MIN_INNER;
                     for (li, line_str) in raw_lines.iter().enumerate() {
                         if li < skip_until {
                             continue;
@@ -110,16 +113,18 @@ impl App {
                             let entering = !in_code_block;
                             in_code_block = !in_code_block;
                             if entering {
+                                code_inner =
+                                    fence_widths.get(&li).copied().unwrap_or(FENCE_MIN_INNER);
                                 let mut spans =
                                     vec![Span::styled(if li == 0 { prefix } else { "  " }, style)];
-                                spans.extend(fence_open_spans(&lang));
+                                spans.extend(fence_open_spans(&lang, code_inner));
                                 if li == 0 {
                                     spans.push(time.clone());
                                 }
                                 all_lines.push(Line::from(spans));
                             } else {
                                 let mut spans = vec![Span::styled("  ", style)];
-                                spans.extend(fence_close_spans());
+                                spans.extend(fence_close_spans(code_inner));
 
                                 all_lines.push(Line::from(spans));
                             }
@@ -168,16 +173,21 @@ impl App {
                             }
                         }
                         if in_code_block {
-                            let mut line_spans = Vec::new();
-                            line_spans
-                                .push(Span::styled(if li == 0 { prefix } else { "  " }, style));
-                            line_spans.push(Span::styled("│ ", crate::theme::Theme::code_block()));
-                            line_spans.extend(highlighted_code_spans(line_str));
+                            for (wi, piece) in
+                                wrap_code_line(line_str, code_inner).iter().enumerate()
+                            {
+                                let mut line_spans = Vec::new();
+                                line_spans.push(Span::styled(
+                                    if li == 0 && wi == 0 { prefix } else { "  " },
+                                    style,
+                                ));
+                                line_spans.extend(code_body_spans(piece, code_inner));
 
-                            if li == 0 {
-                                line_spans.push(time.clone());
+                                if li == 0 && wi == 0 {
+                                    line_spans.push(time.clone());
+                                }
+                                all_lines.push(Line::from(line_spans));
                             }
-                            all_lines.push(Line::from(line_spans));
                             continue;
                         }
                         if trimmed.is_empty() {
@@ -314,7 +324,7 @@ impl App {
 
                     if in_code_block {
                         let mut spans = vec![Span::styled("  ", style)];
-                        spans.extend(fence_close_spans());
+                        spans.extend(fence_close_spans(code_inner));
                         all_lines.push(Line::from(spans));
                     }
                 }
@@ -707,7 +717,10 @@ impl App {
                 all_lines.push(Line::from(spans));
             } else {
                 let stream_table_w = (area.width as usize).saturating_sub(4).max(20);
+                let stream_code_max = code_inner_max(area.width as usize);
+                let stream_fence_widths = fence_block_widths(&s_lines, stream_code_max);
                 let mut stream_in_code = false;
+                let mut stream_code_inner = FENCE_MIN_INNER;
                 let mut stream_skip_until = 0;
                 for (idx, seg) in s_lines.iter().enumerate() {
                     if idx < stream_skip_until {
@@ -723,9 +736,13 @@ impl App {
                             Theme::assistant_prefix(),
                         )];
                         if entering {
-                            spans.extend(fence_open_spans(&lang));
+                            stream_code_inner = stream_fence_widths
+                                .get(&idx)
+                                .copied()
+                                .unwrap_or(FENCE_MIN_INNER);
+                            spans.extend(fence_open_spans(&lang, stream_code_inner));
                         } else {
-                            spans.extend(fence_close_spans());
+                            spans.extend(fence_close_spans(stream_code_inner));
                         }
                         if idx == s_lines.len() - 1 {
                             spans.push(Span::styled(" ▌", Style::default().fg(Color::Yellow)));
@@ -780,16 +797,27 @@ impl App {
                             continue;
                         }
                     }
+                    if stream_in_code {
+                        let pieces = wrap_code_line(seg, stream_code_inner);
+                        let last = pieces.len().saturating_sub(1);
+                        for (pi, piece) in pieces.iter().enumerate() {
+                            let mut spans = vec![Span::styled(
+                                if idx == 0 && pi == 0 { "● " } else { "  " },
+                                Theme::assistant_prefix(),
+                            )];
+                            spans.extend(code_body_spans(piece, stream_code_inner));
+                            if idx == s_lines.len() - 1 && pi == last {
+                                spans.push(Span::styled(" ▌", Style::default().fg(Color::Yellow)));
+                            }
+                            all_lines.push(Line::from(spans));
+                        }
+                        continue;
+                    }
                     let mut spans = vec![Span::styled(
                         if idx == 0 { "● " } else { "  " },
                         Theme::assistant_prefix(),
                     )];
-                    if stream_in_code {
-                        spans.push(Span::styled("│ ", crate::theme::Theme::code_block()));
-                        spans.extend(highlighted_code_spans(seg));
-                    } else {
-                        spans.extend(markdown_inline_spans(seg));
-                    }
+                    spans.extend(markdown_inline_spans(seg));
                     if idx == s_lines.len() - 1 {
                         spans.push(Span::styled(" ▌", Style::default().fg(Color::Yellow)));
                     }
@@ -798,7 +826,7 @@ impl App {
 
                 if stream_in_code {
                     let mut spans = vec![Span::styled("  ", Theme::assistant_prefix())];
-                    spans.extend(fence_close_spans());
+                    spans.extend(fence_close_spans(stream_code_inner));
                     spans.push(Span::styled(" ▌", Style::default().fg(Color::Yellow)));
                     all_lines.push(Line::from(spans));
                 }

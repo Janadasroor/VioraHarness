@@ -235,6 +235,47 @@ mod tests {
     }
 
     #[test]
+    fn code_box_contains_long_lines_and_closes() {
+        let mut app = test_app();
+        app.messages.push(Msg::new(
+            "assistant",
+            "Switch avg current: `Isw_avg` = `IL_avg` * `D`\n```\nIL_avg = Iin = Iout / (1-D) extra tail that must not escape\nΔIL = Vin * D / (L * fsw) = (Vout - Vin)*(1-D) / (L * fsw)\n```",
+        ));
+        let text = render_text(&mut app, 100, 40);
+        let rows: Vec<String> = text
+            .lines()
+            .filter(|l| {
+                let t = l.trim_start();
+                // Box rows sit inside the chat border: `│  ┌…`, `│  │…`, `│  └…`.
+                t.starts_with("│  ┌") || t.starts_with("│  │") || t.starts_with("│  └")
+            })
+            .map(|l| l.trim_end().to_string())
+            .collect();
+        // Open + 2 body + close (chat chrome excluded by the filter).
+        assert_eq!(rows.len(), 4, "closed box rows:\n{text}");
+        let noborder = |l: &String| {
+            let t = l.trim_start();
+            t.strip_prefix('│')
+                .unwrap_or(t)
+                .strip_prefix("  ")
+                .unwrap_or(t)
+                .to_string()
+        };
+        let widths: Vec<usize> = rows.iter().map(|l| noborder(l).width()).collect();
+        assert!(
+            widths.windows(2).all(|w| w[0] == w[1]),
+            "all box rows same width: {widths:?}"
+        );
+        assert!(widths[0] <= 98, "box fits the terminal: {widths:?}");
+        assert!(rows[0].contains('┐'), "top-right corner");
+        assert!(rows[3].contains('┘'), "bottom-right corner");
+        for r in &rows[1..3] {
+            assert!(noborder(r).trim_end().ends_with('│'), "right edge: {r:?}");
+        }
+        assert!(text.contains("Iout / (1-D)"), "long line kept");
+    }
+
+    #[test]
     fn headers_parse_inline_markdown() {
         let mut app = test_app();
         app.messages.push(Msg::new(

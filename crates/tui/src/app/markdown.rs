@@ -191,7 +191,58 @@ pub(crate) fn markdown_inline_spans(text: &str) -> Vec<Span<'static>> {
     if out.is_empty() {
         out.push(Span::raw(text.to_string()));
     }
-    out
+    merge_adjacent_code_spans(out)
+}
+
+/// Join `` `a` = `b` `` runs (inline-code spans separated only by plain
+/// operator/punctuation gaps — no words, no styled spans) into a single badge
+/// so formula-heavy lines don't render as striped pills. Text is preserved
+/// exactly; only span boundaries change.
+fn merge_adjacent_code_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    let code = Theme::inline_code();
+    // End index (of the next code span) for a mergeable gap run starting at
+    // `from`: one or more unstyled spans with no word characters in between.
+    let gap_end = |spans: &[Span], mut k: usize| -> Option<usize> {
+        let mut saw = false;
+        while k < spans.len() && spans[k].style == Style::default() {
+            saw = true;
+            if spans[k].content.chars().any(|c| c.is_alphanumeric()) {
+                return None;
+            }
+            k += 1;
+        }
+        (saw && k < spans.len() && spans[k].style == code).then_some(k)
+    };
+    let mut merged: Vec<Span<'static>> = Vec::with_capacity(spans.len());
+    let mut i = 0;
+    while i < spans.len() {
+        if spans[i].style != code {
+            merged.push(Span {
+                content: spans[i].content.clone(),
+                style: spans[i].style,
+            });
+            i += 1;
+            continue;
+        }
+        let mut text = spans[i].content.to_string();
+        let mut j = i + 1;
+        while let Some(k) = gap_end(&spans, j) {
+            for s in &spans[j..=k] {
+                text.push_str(&s.content);
+            }
+            j = k + 1;
+        }
+        if j == i + 1 {
+            merged.push(Span {
+                content: spans[i].content.clone(),
+                style: spans[i].style,
+            });
+        } else {
+            merged.push(Span::styled(text, code));
+        }
+        i = j;
+    }
+    merged
 }
 
 pub(crate) fn markdown_header_style(level: usize) -> Style {
@@ -219,26 +270,118 @@ pub(crate) fn code_lang_from_fence(line: &str) -> String {
     }
 }
 
-pub(crate) const FENCE_WIDTH: usize = 34;
+pub(crate) const FENCE_MIN_INNER: usize = 12;
 
-pub(crate) fn fence_open_spans(lang: &str) -> Vec<Span<'static>> {
+/// Inner content width available for a code box: 2 (chat gutter) + 2 (`│ `)
+/// + inner + 2 (` │`) + 1 margin must fit `area_width`.
+pub(crate) fn code_inner_max(area_width: usize) -> usize {
+    area_width.saturating_sub(7).max(FENCE_MIN_INNER)
+}
+
+pub(crate) fn expand_code_tabs(s: &str) -> String {
+    s.replace('\t', "    ")
+}
+
+/// Map each fence-open line index to its box inner width: the widest body
+/// line, clamped to `FENCE_MIN_INNER..=max_inner`. Unclosed fences run to
+/// the end of `lines`.
+pub(crate) fn fence_block_widths(
+    lines: &[&str],
+    max_inner: usize,
+) -> std::collections::HashMap<usize, usize> {
+    let mut out = std::collections::HashMap::new();
+    let mut open: Option<usize> = None;
+    let mut widest = 0;
+    // `code_inner_max` guarantees max_inner >= MIN; stay robust anyway.
+    let hi = max_inner.max(FENCE_MIN_INNER);
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim().starts_with("```") {
+            if let Some(o) = open.take() {
+                out.insert(o, widest.clamp(FENCE_MIN_INNER, hi));
+                widest = 0;
+            } else {
+                open = Some(idx);
+            }
+            continue;
+        }
+        if open.is_some() {
+            widest = widest.max(expand_code_tabs(line).width());
+        }
+    }
+    if let Some(o) = open {
+        out.insert(o, widest.clamp(FENCE_MIN_INNER, hi));
+    }
+    out
+}
+
+/// Hard-break a code body line to `inner`-wide rows (tabs expanded first).
+/// Always returns at least one row.
+pub(crate) fn wrap_code_line(line: &str, inner: usize) -> Vec<String> {
+    use unicode_width::UnicodeWidthChar;
+    let inner = inner.max(1);
+    let expanded = expand_code_tabs(line);
+    if expanded.width() <= inner {
+        return vec![expanded];
+    }
+    let mut rows = Vec::new();
+    let mut cur = String::new();
+    let mut cur_w = 0;
+    for c in expanded.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if cur_w + cw > inner && !cur.is_empty() {
+            rows.push(std::mem::take(&mut cur));
+            cur_w = 0;
+        }
+        cur.push(c);
+        cur_w += cw;
+    }
+    if !cur.is_empty() {
+        rows.push(cur);
+    }
+    if rows.is_empty() {
+        rows.push(String::new());
+    }
+    rows
+}
+
+pub(crate) fn fence_open_spans(lang: &str, inner: usize) -> Vec<Span<'static>> {
     let label = if lang.is_empty() {
         "code".to_string()
     } else {
         lang.to_string()
     };
+    let inner = inner.max(FENCE_MIN_INNER);
+    // `┌─ {label} {─…}┐` totals inner + 4.
+    let dashes = (inner + 4).saturating_sub(4 + label.len() + 1);
     let mut spans = vec![Span::styled("┌─ ", Theme::code_block())];
-    spans.push(Span::styled(format!("{label} "), Theme::code_lang_label()));
-    let dashes = FENCE_WIDTH.saturating_sub(4 + label.len());
-    spans.push(Span::styled("─".repeat(dashes), Theme::code_block()));
+    spans.push(Span::styled(label, Theme::code_lang_label()));
+    spans.push(Span::styled(
+        format!(" {}┐", "─".repeat(dashes)),
+        Theme::code_block(),
+    ));
     spans
 }
 
-pub(crate) fn fence_close_spans() -> Vec<Span<'static>> {
+pub(crate) fn fence_close_spans(inner: usize) -> Vec<Span<'static>> {
+    let inner = inner.max(FENCE_MIN_INNER);
     vec![Span::styled(
-        format!("└{}", "─".repeat(FENCE_WIDTH - 1)),
+        format!("└{}┘", "─".repeat(inner + 2)),
         Theme::code_block(),
     )]
+}
+
+/// Full closed box row: `│ {content padded to inner} │`, highlight-preserving.
+/// `line` must already fit `inner` (see [`wrap_code_line`]).
+pub(crate) fn code_body_spans(line: &str, inner: usize) -> Vec<Span<'static>> {
+    let inner = inner.max(FENCE_MIN_INNER);
+    let mut spans = vec![Span::styled("│ ", Theme::code_block())];
+    spans.extend(highlighted_code_spans(line));
+    let pad = inner.saturating_sub(line.width());
+    if pad > 0 {
+        spans.push(Span::styled(" ".repeat(pad), Theme::code_block()));
+    }
+    spans.push(Span::styled(" │", Theme::code_block()));
+    spans
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -1521,12 +1664,21 @@ mod tests {
 
     #[test]
     fn fence_rules_align_and_code_bg_uniform() {
-        let open = fence_open_spans("bash");
-        let close = fence_close_spans();
+        let open = fence_open_spans("bash", 20);
+        let close = fence_close_spans(20);
         let open_w: usize = open.iter().map(|s| s.content.width()).sum();
         let close_w: usize = close.iter().map(|s| s.content.width()).sum();
         assert_eq!(open_w, close_w, "fence top/bottom rules align");
-        assert_eq!(open_w, FENCE_WIDTH);
+        assert_eq!(open_w, 24, "inner + 4 border cols");
+
+        let body = code_body_spans("echo hi", 20);
+        let body_w: usize = body.iter().map(|s| s.content.width()).sum();
+        assert_eq!(body_w, open_w, "body row matches rules");
+        let text: String = body.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            text.starts_with("│ ") && text.ends_with(" │"),
+            "closed box: {text:?}"
+        );
 
         let code_bg = Theme::code_block().bg;
         for line in [
@@ -1539,6 +1691,64 @@ mod tests {
                 assert_eq!(s.style.bg, code_bg, "uniform bg for {line:?}");
             }
         }
+    }
+
+    #[test]
+    fn fence_block_widths_size_to_content_and_clamp() {
+        let lines = vec![
+            "```",
+            "hi",
+            "a much longer body line here",
+            "```",
+            "```rust",
+            "```",
+        ];
+        let widths = fence_block_widths(&lines, 100);
+        assert_eq!(widths[&0], "a much longer body line here".width());
+        // Empty block still gets a usable minimum.
+        assert_eq!(widths[&4], FENCE_MIN_INNER);
+        // Clamped to the available maximum; below-minimum max stays robust.
+        let widths = fence_block_widths(&lines, 20);
+        assert_eq!(widths[&0], 20);
+        assert_eq!(fence_block_widths(&lines, 4)[&0], FENCE_MIN_INNER);
+        // Unclosed fence runs to the end.
+        let open = vec!["```py", "print(12345678901234567890)"];
+        assert_eq!(
+            fence_block_widths(&open, 100)[&0],
+            "print(12345678901234567890)".width()
+        );
+    }
+
+    #[test]
+    fn wrap_code_line_hard_breaks_wide_chars() {
+        assert_eq!(wrap_code_line("abc", 10), vec!["abc"]);
+        assert_eq!(wrap_code_line("abcdef", 4), vec!["abcd", "ef"]);
+        assert_eq!(wrap_code_line("a\tb", 10), vec!["a    b"]);
+        // Wide chars count double.
+        assert_eq!(wrap_code_line("ab中d", 4), vec!["ab中", "d"]);
+    }
+
+    #[test]
+    fn adjacent_inline_code_merges_into_one_badge() {
+        let spans = markdown_inline_spans("Switch avg: `Isw_avg` = `IL_avg` * `D` done");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "Switch avg: Isw_avg = IL_avg * D done");
+        let code: Vec<&Span> = spans
+            .iter()
+            .filter(|s| s.style == Theme::inline_code())
+            .collect();
+        assert_eq!(code.len(), 1, "one badge: {spans:?}");
+        assert_eq!(code[0].content.as_ref(), "Isw_avg = IL_avg * D");
+    }
+
+    #[test]
+    fn inline_code_merge_keeps_words_split() {
+        let spans = markdown_inline_spans("`a` and `b`");
+        let code: Vec<&Span> = spans
+            .iter()
+            .filter(|s| s.style == Theme::inline_code())
+            .collect();
+        assert_eq!(code.len(), 2, "real words stay separate: {spans:?}");
     }
 
     #[test]
