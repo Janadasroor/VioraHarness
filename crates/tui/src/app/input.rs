@@ -303,7 +303,7 @@ impl InputState {
             ),
             (
                 "/mode",
-                "switch agent mode — /mode <eda|web> (tool allowlist)",
+                "switch agent mode — /mode <eda|web|android> (tool allowlist)",
             ),
             (
                 "/theme",

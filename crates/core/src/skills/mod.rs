@@ -275,6 +275,7 @@ mod tests {
         assert!(names.contains(&"flux"));
         assert!(names.contains(&"erc"));
         assert!(names.contains(&"web"));
+        assert!(names.contains(&"android"));
     }
 
     #[test]

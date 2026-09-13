@@ -315,7 +315,7 @@ impl Palette {
     }
 }
 
-fn hex_to_color(hex: &str) -> Color {
+pub(crate) fn hex_to_color(hex: &str) -> Color {
     let hex = hex.trim_start_matches('#');
     if hex.len() == 6 {
         if let (Ok(r), Ok(g), Ok(b)) = (

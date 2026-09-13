@@ -41,10 +41,36 @@ const WEB_TOOLS: &[&str] = &[
     "dev_serve",
 ];
 
+/// Android mode allowlist: core tools + docs. `adb_*` device tools and
+/// emulator control land here once registered (unknown names simply match
+/// nothing until then); until that follow-up, Gradle work runs via bash.
+const ANDROID_TOOLS: &[&str] = &[
+    "read",
+    "write",
+    "glob",
+    "grep",
+    "bash",
+    "edit",
+    "apply_patch",
+    "todowrite",
+    "question",
+    "task",
+    "skill",
+    "webfetch",
+    "websearch",
+    "adb_devices",
+    "adb_install",
+    "adb_shell",
+    "adb_logcat",
+    "emulator",
+];
+
 #[derive(Debug, Clone, Copy)]
 pub struct Mode {
     pub name: &'static str,
     pub description: &'static str,
+    /// Hex accent (`#rrggbb`) for the mode's UI label. Android is green.
+    pub accent: &'static str,
     /// None = full registry (today's behavior). Some(list) = the model
     /// only sees these tools, and anything else fails closed at dispatch.
     pub tools: Option<&'static [&'static str]>,
@@ -59,6 +85,7 @@ pub fn builtin_modes() -> Vec<Mode> {
         Mode {
             name: "eda",
             description: "VioraEDA hardware work (schematic/PCB/SPICE) + general coding. Full tool access.",
+            accent: "#c9a86a",
             tools: None,
             skills: &["sim", "pcb", "erc", "flux"],
             system_extra: "",
@@ -66,9 +93,18 @@ pub fn builtin_modes() -> Vec<Mode> {
         Mode {
             name: "web",
             description: "Web development: dev servers, headless Chrome screenshots/DOM, docs. No EDA sim/PCB tools.",
+            accent: "#7aa2f7",
             tools: Some(WEB_TOOLS),
             skills: &["web"],
             system_extra: "Web loop: dev_serve the folder (port 0 picks one) -> browser_screenshot for vision -> browser_dom to assert text -> edit -> re-screenshot. After every web edit, re-screenshot; describe what you see, don't dump pixels. Kill dev servers via /tasks when done. Visible Chrome needs browser_open (Ask-gated); never xdotool windowclose.",
+        },
+        Mode {
+            name: "android",
+            description: "Android development: Gradle builds via bash, docs, device tools as they land. No EDA sim/PCB tools.",
+            accent: "#3ddc84",
+            tools: Some(ANDROID_TOOLS),
+            skills: &["android"],
+            system_extra: "Android loop: edit -> build with the project's Gradle wrapper via bash (background:true for long builds, follow the log) -> verify. Device tools (adb_*, emulator) appear here once registered; until then drive devices via bash adb. Never run UI actions blind — prefer screenshots/logs as feedback.",
         },
     ]
 }
@@ -271,6 +307,30 @@ mod tests {
         );
         assert!(!is_known_mode("nope"));
         assert!(is_known_mode("WEB"));
+    }
+
+    #[test]
+    fn android_mode_is_green_and_restrictive() {
+        let android = find_mode("android").expect("android builtin");
+        assert_eq!(android.accent, "#3ddc84");
+        assert_eq!(find_mode("eda").unwrap().accent, "#c9a86a");
+        assert_eq!(find_mode("web").unwrap().accent, "#7aa2f7");
+        let reg = registry_for_mode("android");
+        let names: Vec<&str> = reg.all().iter().map(|t| t.name.as_str()).collect();
+        for must in ["read", "bash", "edit", "webfetch", "task", "skill"] {
+            assert!(names.contains(&must), "android missing {must}");
+        }
+        for hidden in [
+            "netlist_run",
+            "pcb_compose",
+            "browser_screenshot",
+            "dev_serve",
+        ] {
+            assert!(!names.contains(&hidden), "android leaks {hidden}");
+        }
+        // Forward-declared adb_* tools resolve once registered; until then
+        // the filter just matches nothing.
+        assert!(is_known_mode("ANDROID"));
     }
 
     #[test]

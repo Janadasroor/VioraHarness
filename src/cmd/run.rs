@@ -14,7 +14,7 @@ pub(crate) async fn cmd_run(
     }
     if let Some(ref md) = cli_mode {
         if !vioraharness_core::mode::is_known_mode(md) {
-            eprintln!("unknown mode: {md} (known: eda, web) — see /mode in the TUI");
+            eprintln!("unknown mode: {md} (known: eda, web, android) — see /mode in the TUI");
             std::process::exit(2);
         }
     }

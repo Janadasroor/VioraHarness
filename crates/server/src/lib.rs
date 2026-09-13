@@ -657,7 +657,7 @@ async fn prompt_async(
             if !vioraharness_core::mode::is_known_mode(&m) {
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(serde_json::json!({"error": format!("unknown mode: {m} (known: eda, web)")})),
+                    Json(serde_json::json!({"error": format!("unknown mode: {m} (known: eda, web, android)")})),
                 )
                     .into_response();
             }

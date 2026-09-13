@@ -82,7 +82,13 @@ impl App {
             Span::styled(format!("[{}] ", self.mode.to_uppercase()), mode_style),
             Span::styled(
                 format!("{{ {} }} ", self.agent_mode),
-                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(crate::theme::hex_to_color(
+                        vioraharness_core::mode::find_mode(&self.agent_mode)
+                            .map(|m| m.accent)
+                            .unwrap_or("#c9a86a"),
+                    ))
+                    .add_modifier(Modifier::BOLD),
             ),
         ];
         if let Some((label, style)) = busy_button {

@@ -100,8 +100,8 @@ impl App {
                     for m in agent_modes::builtin_modes() {
                         let tools = agent_modes::registry_for_mode(m.name).all().len();
                         lines.push(format!(
-                            "  {:<8} {tools:>3} tools — {}",
-                            m.name, m.description
+                            "  {:<8} {tools:>3} tools {} — {}",
+                            m.name, m.accent, m.description
                         ));
                     }
                     lines.push("usage: /mode <name>".to_string());

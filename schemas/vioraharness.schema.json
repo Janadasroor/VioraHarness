@@ -31,7 +31,7 @@
     "sandbox": { "type": "string", "enum": ["strict", "relaxed", "off"] },
     "activeMode": {
       "type": "string",
-      "enum": ["eda", "web"],
+      "enum": ["eda", "web", "android"],
       "description": "Default agent mode (tool allowlist). Overridden by --mode / VIORAHARNESS_MODE / session mode."
     },
     "session": {
