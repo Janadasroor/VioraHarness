@@ -32,6 +32,29 @@ pub(crate) fn short_err_id(id: &str) -> String {
     }
 }
 
+/// Short display id for tool calls (`call_abc123…`, `toolu_xyz…`, `c1`).
+/// Strips the provider prefix and keeps the last 6 alphanumerics so chat
+/// cards read `● bash · npm test · #a1b2c3` — unique enough for display,
+/// never used as a key.
+pub(crate) fn short_tool_id(id: &str) -> String {
+    let mut s = id;
+    for prefix in ["call_", "toolu_", "tool_", "task_", "err_"] {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    let clean: String = s.chars().filter(|c| c.is_alphanumeric()).collect();
+    if clean.is_empty() {
+        return s.chars().take(6).collect();
+    }
+    if clean.len() > 6 {
+        clean[clean.len() - 6..].to_string()
+    } else {
+        clean
+    }
+}
+
 pub(crate) fn expand_paste_chips(prompt: &str, texts: &[(usize, String)]) -> String {
     let mut out = prompt.to_string();
     for (id, text) in texts {
@@ -284,6 +307,31 @@ pub(crate) fn pretty_tool_args_wide(name: &str, args: &str, wide: bool) -> Strin
                 } else if !pat.is_empty() {
                     return pat.to_string();
                 }
+            }
+            "browser_screenshot" | "browser_dom" | "browser_pdf" => {
+                let target = v.get("target").and_then(|x| x.as_str()).unwrap_or("");
+                if target.is_empty() {
+                    return String::new();
+                }
+                let short = rel_in_str(target);
+                if name == "browser_screenshot" {
+                    let w = v.get("width").and_then(|x| x.as_u64());
+                    let h = v.get("height").and_then(|x| x.as_u64());
+                    if let (Some(w), Some(h)) = (w, h) {
+                        return format!("{short} · {w}x{h}");
+                    }
+                }
+                return short;
+            }
+            "dev_serve" => {
+                let dir = v.get("dir").and_then(|x| x.as_str()).unwrap_or(".");
+                let short = rel_in_str(dir);
+                if let Some(p) = v.get("port").and_then(|x| x.as_u64()) {
+                    if p != 0 {
+                        return format!("{short} :{p}");
+                    }
+                }
+                return short;
             }
             _ => {}
         }
@@ -998,6 +1046,35 @@ mod tests {
             !pretty_tool_result_wide(&fresh, false).contains("AAAA"),
             "no pixel dump on the card"
         );
+    }
+
+    #[test]
+    fn short_tool_ids_keep_last_six() {
+        assert_eq!(short_tool_id("call_abc123def456"), "def456");
+        assert_eq!(short_tool_id("toolu_xyz789"), "xyz789");
+        assert_eq!(short_tool_id("c1"), "c1");
+        assert_eq!(short_tool_id("call_bash_1"), "bash1");
+        assert_eq!(short_tool_id(""), "");
+    }
+
+    #[test]
+    fn browser_cards_summarize_target() {
+        let shot =
+            serde_json::json!({"target": "https://example.com/", "width": 1280, "height": 800})
+                .to_string();
+        assert_eq!(
+            pretty_tool_args("browser_screenshot", &shot),
+            "https://example.com/ · 1280x800"
+        );
+        let dom = serde_json::json!({"target": "https://example.com/"}).to_string();
+        assert_eq!(
+            pretty_tool_args("browser_dom", &dom),
+            "https://example.com/"
+        );
+        let serve = serde_json::json!({"dir": ".", "port": 8000}).to_string();
+        assert_eq!(pretty_tool_args("dev_serve", &serve), ". :8000");
+        let serve_auto = serde_json::json!({"dir": "public"}).to_string();
+        assert_eq!(pretty_tool_args("dev_serve", &serve_auto), "public");
     }
 
     #[test]

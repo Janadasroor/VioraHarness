@@ -60,6 +60,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn headless_fails_closed_with_guidance() {
         let _g = lock_tests();
 
@@ -83,6 +84,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn answered_roundtrip_via_channel() {
         let _g = lock_tests();
 

@@ -1,4 +1,5 @@
 pub mod bash;
+pub mod browser;
 pub mod fs;
 pub mod patch;
 pub mod question;
@@ -600,6 +601,10 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
                 .map(|n| n as usize);
             web::websearch(query, count).await
         }
+        "browser_screenshot" => browser::browser_screenshot(args).await,
+        "browser_dom" => browser::browser_dom(args).await,
+        "browser_pdf" => browser::browser_pdf(args).await,
+        "dev_serve" => browser::dev_serve(args).await,
         _ => json!({"ok": false, "error": format!("unknown tool: {}", name)}),
     }
 }
@@ -741,6 +746,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn edit_snapshot_uses_db_seq_not_zero() {
         // Snapshots must carry the session's DB seq so rewind targets line up.
         use crate::session::SessionStore;

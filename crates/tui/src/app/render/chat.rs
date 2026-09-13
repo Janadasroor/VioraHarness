@@ -447,10 +447,13 @@ impl App {
                         } else {
                             String::new()
                         };
-                        let preview_with_elapsed = if elapsed_suffix.is_empty() {
-                            preview
+                        // Unique card title: `● name · summary · #shortid`
+                        // (quiet/empty summary collapses to `● name · #shortid`).
+                        let short = short_tool_id(id);
+                        let tail = if preview.is_empty() {
+                            format!(" · #{short}{elapsed_suffix}")
                         } else {
-                            format!("{preview}{elapsed_suffix}")
+                            format!(" · {preview} · #{short}{elapsed_suffix}")
                         };
                         let preview_style = if *status == ToolStatus::Error {
                             crate::theme::Theme::error_message()
@@ -460,10 +463,10 @@ impl App {
                         let tline = Line::from(vec![
                             Span::raw("    "),
                             Span::styled(
-                                format!("{icon} {name} "),
+                                format!("{icon} {name}"),
                                 Style::default().fg(col).add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(preview_with_elapsed, preview_style),
+                            Span::styled(tail, preview_style),
                         ]);
                         all_lines.push(tline);
                     }
@@ -483,9 +486,9 @@ impl App {
                         };
 
                         let label: String = if tname.is_empty() {
-                            id.chars().take(12).collect()
+                            format!("#{}", short_tool_id(id))
                         } else {
-                            tname.to_string()
+                            format!("{} · #{}", tname, short_tool_id(id))
                         };
                         let head = format!("{icon} {label} ");
                         let expanded = self.expanded_messages.contains(&(abs_idx, Some(ii)));

@@ -187,6 +187,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn default_model_env_override_wins() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("VIORAHARNESS_SUBAGENT_MODEL").ok();

@@ -238,7 +238,7 @@ pub fn git_commit_scoped(cwd: &Path, files: &[String], message: &str) -> Result<
         return Ok("(nothing to commit)".into());
     }
     git(cwd, &["commit", "-m", message])?;
-    Ok(git(cwd, &["rev-parse", "--short", "HEAD"])?)
+    git(cwd, &["rev-parse", "--short", "HEAD"])
 }
 
 #[derive(Debug, Clone, PartialEq)]

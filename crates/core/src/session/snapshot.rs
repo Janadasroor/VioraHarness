@@ -292,6 +292,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn undo_stack_push_pop_list_roundtrip() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_db = std::env::var("VIORAHARNESS_DB").ok();
@@ -329,6 +330,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn undo_stack_caps_at_20() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev_db = std::env::var("VIORAHARNESS_DB").ok();

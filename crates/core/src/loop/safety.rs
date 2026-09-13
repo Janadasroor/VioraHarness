@@ -63,7 +63,6 @@ pub(crate) fn redirect_writes_external(seg: &str) -> bool {
 }
 
 /// (every `2>&1` command would look compound and fail safety checks).
-
 pub(crate) fn split_shell_segments(cmd: &str) -> Vec<&str> {
     let b = cmd.as_bytes();
     let mut segs: Vec<&str> = Vec::new();
@@ -260,6 +259,26 @@ pub(crate) fn segment_is_dangerous(seg: &str) -> bool {
         // `kill -9 -1` targets every process the user owns.
         return true;
     }
+    // Window-manager closes kill the window and its processes (a closed
+    // terminal takes its shells with it) — always worth a glance first.
+    // Pure positioning (activate/raise/lower/minimize) stays allowed.
+    if base == "xdotool"
+        && toks[1..].iter().any(|t| {
+            matches!(
+                *t,
+                "windowclose" | "windowkill" | "windowunmap" | "close" | "kill"
+            )
+        })
+    {
+        return true;
+    }
+    if base == "wmctrl"
+        && toks[1..]
+            .iter()
+            .any(|t| *t == "-c" || *t == "--close" || *t == "-C")
+    {
+        return true;
+    }
     if base == "xargs"
         && toks[1..].iter().any(|t| {
             let b = t.trim_start_matches("./").rsplit('/').next().unwrap_or(t);
@@ -285,7 +304,7 @@ pub(crate) fn wants_detach(args_str: &str) -> bool {
     let raw = bash_command(args_str);
     for seg in split_shell_segments(&raw.to_lowercase()) {
         // Raw first: strip_wrappers eats nohup/setsid as plain wrappers.
-        for candidate in [seg.as_ref(), strip_wrappers(seg)] {
+        for candidate in [seg, strip_wrappers(seg)] {
             let first = candidate
                 .split_whitespace()
                 .next()

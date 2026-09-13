@@ -675,6 +675,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn glob_end_to_end_nested() {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("VIORAHARNESS_APPROVED_CALL").ok();
@@ -698,6 +699,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn grep_falls_back_without_rg() {
         // P0 #2/#9: must return hits via system grep, never silent ok:true.
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -844,7 +846,7 @@ mod tests {
         mk("notes.txt", 10);
         mk("other.jpg", 5);
         mk("Screenshot_anim.gif", 5);
-        let got = latest_screenshot_in(&[pics.clone()]).expect("finds one");
+        let got = latest_screenshot_in(std::slice::from_ref(&pics)).expect("finds one");
         assert_eq!(got, new, "newest Screenshot_*.png wins");
         assert_ne!(got, old);
 
@@ -933,6 +935,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn traversal_via_tmp_dotdot_denied() {
         // Depends on default env (no blanket approval): serialize against
         // tests that set VIORAHARNESS_APPROVED_CALL, even though this test
@@ -988,6 +991,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn edit_outside_root_denied() {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = edit_file(json!({"path": "/etc/vh-nope-x", "old_string": "a", "new_string": "b"}))

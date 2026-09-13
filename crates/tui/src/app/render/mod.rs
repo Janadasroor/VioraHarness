@@ -475,6 +475,34 @@ mod tests {
     }
 
     #[test]
+    fn tool_cards_show_name_summary_id() {
+        let mut app = test_app();
+        let mut m = Msg::new("assistant", "working");
+        m.items.push(Content::ToolCall {
+            id: "call_abc123def456".into(),
+            name: "bash".into(),
+            args: "{\"command\": \"npm test\"}".into(),
+            status: ToolStatus::Done,
+        });
+        m.items.push(Content::ToolResult {
+            id: "call_abc123def456".into(),
+            content: "{\"ok\":true,\"code\":0,\"stdout\":\"ok\"}".into(),
+            ok: true,
+        });
+        app.messages.push(m);
+        let text = render_text(&mut app, 100, 30);
+        assert!(
+            text.contains("● bash · npm test · #def456"),
+            "call title is Name + summary + ID: {text}"
+        );
+        assert!(
+            text.contains("✔ bash · #def456"),
+            "result title carries Name + ID: {text}"
+        );
+        assert!(!text.contains("call_abc"), "raw provider id hidden: {text}");
+    }
+
+    #[test]
     fn edit_card_shows_inline_mini_diff() {
         let diff = "--- a/AGENTS.md\n+++ b/AGENTS.md\n@@ -43 +43 @@\n-old line here\n+new line here\n context\n+second add\n+third add\n+fourth add\n+fifth add\n";
         let (shown, rest) = diff_card_lines(diff, 4);

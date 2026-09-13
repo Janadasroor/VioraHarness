@@ -618,6 +618,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn executor_update_add_delete() {
         // Asserts jail denial: serialize against tests that approve all.
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());

@@ -264,6 +264,46 @@ impl ToolRegistry {
             },
             "required":["query"]
         }));
+        self.register("browser_screenshot", "Screenshot a page with headless Chrome CLI (local .html or http(s), incl. localhost dev servers). Returns PNG base64 vision — use after web edits for visual feedback, like schematic-render.", json!({
+            "type":"object",
+            "properties":{
+                "target":{"type":"string","description":"http(s) URL or local .html path"},
+                "out":{"type":"string","description":"output PNG path (default /tmp)"},
+                "width":{"type":"integer","minimum":320,"maximum":3840},
+                "height":{"type":"integer","minimum":240,"maximum":2160},
+                "delay_ms":{"type":"integer","minimum":0,"maximum":15000,"description":"JS settle time (virtual-time-budget)"}
+            },
+            "required":["target"]
+        }));
+        self.register("browser_dom", "Dump rendered DOM text with headless Chrome CLI (--dump-dom + virtual-time-budget so JS runs). Use to verify web edits without images.", json!({
+            "type":"object",
+            "properties":{
+                "target":{"type":"string","description":"http(s) URL or local .html path"},
+                "max_chars":{"type":"integer","minimum":100,"maximum":100000},
+                "wait_ms":{"type":"integer","minimum":0,"maximum":15000}
+            },
+            "required":["target"]
+        }));
+        self.register(
+            "browser_pdf",
+            "Export a page to PDF with headless Chrome CLI (--print-to-pdf, no headers/footers).",
+            json!({
+                "type":"object",
+                "properties":{
+                    "target":{"type":"string","description":"http(s) URL or local .html path"},
+                    "out":{"type":"string","description":"output PDF path (default /tmp)"}
+                },
+                "required":["target"]
+            }),
+        );
+        self.register("dev_serve", "Serve a directory over localhost (python3 http.server) as a detached background task. Returns {url, task_id, log} — screenshot/fetch the url, then /tasks kill.", json!({
+            "type":"object",
+            "properties":{
+                "dir":{"type":"string","description":"directory to serve (default .)"},
+                "port":{"type":"integer","minimum":0,"maximum":65535,"description":"0 = pick a free port"}
+            },
+            "required":[]
+        }));
     }
 
     pub fn all(&self) -> &[ToolDef] {
@@ -326,6 +366,10 @@ mod tests {
             "skill",
             "webfetch",
             "websearch",
+            "browser_screenshot",
+            "browser_dom",
+            "browser_pdf",
+            "dev_serve",
             "viora",
             "netlist_run",
             "schematic_render",

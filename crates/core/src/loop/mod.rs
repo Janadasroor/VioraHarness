@@ -1345,6 +1345,33 @@ mod tests {
     }
 
     #[test]
+    fn dangerous_bash_window_close() {
+        // Closing/unmapping a window kills it (a terminal takes its shells
+        // with it) — must downgrade to ask, like pattern kills.
+        for cmd in [
+            "xdotool windowclose 0x3600006",
+            "xdotool windowkill 0x3600006",
+            "xdotool windowunmap 0x3600006",
+            "sudo xdotool windowclose 0x3600006",
+            "ls; xdotool windowclose 0x3600006",
+            "wmctrl -c Terminal",
+            "wmctrl --close :SELECT:",
+        ] {
+            assert!(is_dangerous_bash(&bash_args(cmd)), "danger: {cmd}");
+        }
+        for cmd in [
+            "xdotool windowactivate 0x4e00003",
+            "xdotool windowraise 0x4e00003",
+            "xdotool windowminimize 0x3600006",
+            "xdotool getactivewindow",
+            "xdotool search --onlyvisible --name Viora",
+            "wmctrl -l",
+        ] {
+            assert!(!is_dangerous_bash(&bash_args(cmd)), "safe: {cmd}");
+        }
+    }
+
+    #[test]
     fn strip_wrappers_peels_stacked_wrappers() {
         assert_eq!(strip_wrappers("sudo rm -rf /tmp/x"), "rm -rf /tmp/x");
         assert_eq!(strip_wrappers("sudo nohup timeout 5 rm f"), "rm f");

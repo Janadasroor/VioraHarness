@@ -144,6 +144,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn roundtrip_replace_and_merge() {
         let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = std::env::temp_dir().join(format!("vh-todo-test-{}", std::process::id()));
