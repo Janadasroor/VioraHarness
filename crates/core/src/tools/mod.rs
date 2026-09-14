@@ -1,3 +1,4 @@
+pub mod android;
 pub mod bash;
 pub mod browser;
 pub mod fs;
@@ -876,6 +877,15 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
         "browser_pdf" => browser::browser_pdf(args).await,
         "browser_open" => browser::browser_open(args).await,
         "dev_serve" => browser::dev_serve(args).await,
+        "adb_devices" => android::adb_devices(args).await,
+        "adb_shell" => android::adb_shell(args).await,
+        "adb_install" => android::adb_install(args).await,
+        "adb_logcat" => android::adb_logcat(args).await,
+        "adb_push" => android::adb_push(args).await,
+        "adb_pull" => android::adb_pull(args).await,
+        "adb_screenshot" => android::adb_screenshot(args).await,
+        "emulator" => android::emulator_ctl(args).await,
+        "gradle" => android::gradle(args).await,
         _ => json!({"ok": false, "error": format!("unknown tool: {}", name)}),
     }
 }

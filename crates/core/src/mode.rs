@@ -41,9 +41,9 @@ const WEB_TOOLS: &[&str] = &[
     "dev_serve",
 ];
 
-/// Android mode allowlist: core tools + docs. `adb_*` device tools and
-/// emulator control land here once registered (unknown names simply match
-/// nothing until then); until that follow-up, Gradle work runs via bash.
+/// Android mode allowlist: core tools + docs + first-class device tools.
+/// `adb` resolves via `ADB_BIN`/`ANDROID_HOME`/`ANDROID_SDK_ROOT`/`PATH`
+/// (no hardcoded SDK path); serial auto-selects with one device attached.
 const ANDROID_TOOLS: &[&str] = &[
     "read",
     "write",
@@ -62,7 +62,11 @@ const ANDROID_TOOLS: &[&str] = &[
     "adb_install",
     "adb_shell",
     "adb_logcat",
+    "adb_push",
+    "adb_pull",
+    "adb_screenshot",
     "emulator",
+    "gradle",
 ];
 
 #[derive(Debug, Clone, Copy)]
@@ -104,7 +108,7 @@ pub fn builtin_modes() -> Vec<Mode> {
             accent: "#3ddc84",
             tools: Some(ANDROID_TOOLS),
             skills: &["android"],
-            system_extra: "Android loop: edit -> build with the project's Gradle wrapper via bash (background:true for long builds, follow the log) -> verify. Device tools (adb_*, emulator) appear here once registered; until then drive devices via bash adb. Never run UI actions blind — prefer screenshots/logs as feedback.",
+            system_extra: "Android loop: adb_devices to confirm the target (serial auto-selects with one device) -> edit -> gradle tool (background:true for long builds, follow the task log) -> adb_install -r -> adb_logcat/adb_shell to verify. emulator list|boot manages AVDs (boot detaches, kill via /tasks). adb_shell/adb_install are Ask-gated. Never run UI actions blind — prefer logcat/shell dumps as feedback.",
         },
     ]
 }
@@ -326,7 +330,23 @@ mod tests {
         assert_eq!(find_mode("web").unwrap().accent, "#7aa2f7");
         let reg = registry_for_mode("android");
         let names: Vec<&str> = reg.all().iter().map(|t| t.name.as_str()).collect();
-        for must in ["read", "bash", "edit", "webfetch", "task", "skill"] {
+        for must in [
+            "read",
+            "bash",
+            "edit",
+            "webfetch",
+            "task",
+            "skill",
+            "adb_devices",
+            "adb_shell",
+            "adb_install",
+            "adb_logcat",
+            "adb_push",
+            "adb_pull",
+            "adb_screenshot",
+            "emulator",
+            "gradle",
+        ] {
             assert!(names.contains(&must), "android missing {must}");
         }
         for hidden in [
@@ -341,8 +361,7 @@ mod tests {
         ] {
             assert!(!names.contains(&hidden), "android leaks {hidden}");
         }
-        // Forward-declared adb_* tools resolve once registered; until then
-        // the filter just matches nothing.
+        // Device tools are first-class now (adb/emulator/gradle all dispatch).
         assert!(is_known_mode("ANDROID"));
     }
 

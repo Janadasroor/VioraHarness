@@ -324,6 +324,28 @@ pub(crate) fn pretty_tool_args_wide(name: &str, args: &str, wide: bool) -> Strin
                 }
                 return short;
             }
+            "adb_devices" | "adb_shell" | "adb_install" | "adb_logcat" | "adb_push"
+            | "adb_pull" | "adb_screenshot" | "emulator" | "gradle" => {
+                let target = v
+                    .get("command")
+                    .or_else(|| v.get("apk"))
+                    .or_else(|| v.get("avd"))
+                    .or_else(|| v.get("src"))
+                    .or_else(|| v.get("action"))
+                    .or_else(|| v.get("dir"))
+                    .or_else(|| v.get("out"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let short = rel_in_str(target);
+                if let Some(serial) = v.get("serial").and_then(|x| x.as_str()) {
+                    if !serial.is_empty() && !short.is_empty() {
+                        return format!("{short} @ {serial}");
+                    } else if !serial.is_empty() {
+                        return format!("@ {serial}");
+                    }
+                }
+                return short;
+            }
             "netlist_run"
             | "netlist_validate"
             | "schematic_render"

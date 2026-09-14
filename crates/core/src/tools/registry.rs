@@ -400,6 +400,91 @@ impl ToolRegistry {
             },
             "required":[]
         }));
+        self.register("adb_devices", "List attached Android devices (adb devices -l). Returns [{serial, state, details}]. Confirm the target before any device action.", json!({
+            "type":"object","properties":{"timeout":{"type":"integer"}},"required":[]
+        }));
+        self.register("adb_shell", "Run a shell command on an Android device. Serial auto-selects when exactly one device is attached (else pass serial or set ANDROID_SERIAL).", json!({
+            "type":"object","properties":{
+                "command":{"type":"string","description":"shell command (e.g. getprop ro.build.version.sdk)"},
+                "serial":{"type":"string"},
+                "timeout":{"type":"integer"}
+            },"required":["command"]
+        }));
+        self.register("adb_install", "Install an APK on a device (Ask-gated). Device errors (e.g. signature conflicts) surface in stdout.", json!({
+            "type":"object","properties":{
+                "apk":{"type":"string","description":"in-root .apk path"},
+                "serial":{"type":"string"},
+                "reinstall":{"type":"boolean","description":"-r keep data"},
+                "downgrade":{"type":"boolean","description":"-d allow downgrade"},
+                "grant":{"type":"boolean","description":"-g grant runtime permissions"},
+                "test":{"type":"boolean","description":"-t allow test packages"},
+                "timeout":{"type":"integer"}
+            },"required":["apk"]
+        }));
+        self.register("adb_logcat", "Dump device logs (adb logcat -d). Dump mode only — for a live tail use bash background:true and follow /tasks.", json!({
+            "type":"object","properties":{
+                "serial":{"type":"string"},
+                "lines":{"type":"integer","description":"-t last N lines"},
+                "format":{"type":"string","description":"-v format (e.g. brief, time, color)"},
+                "filter":{"type":["string","array"],"description":"logcat filter specs (e.g. ActivityManager:I)","items":{"type":"string"}},
+                "timeout":{"type":"integer"}
+            },"required":[]
+        }));
+        self.register(
+            "adb_screenshot",
+            "Capture the device screen to PNG (returns base64 vision). Use after UI actions instead of running blind.",
+            json!({
+                "type":"object","properties":{
+                    "serial":{"type":"string"},
+                    "out":{"type":"string","description":"output PNG path (default /tmp/adb_screenshot.png)"},
+                    "timeout":{"type":"integer"}
+                },"required":[]
+            }),
+        );
+        self.register(
+            "adb_push",
+            "Push a host file to a device (src must be in-root).",
+            json!({
+                "type":"object","properties":{
+                    "src":{"type":"string","description":"in-root host path"},
+                    "dst":{"type":"string","description":"device path (e.g. /data/local/tmp/x)"},
+                    "serial":{"type":"string"},
+                    "timeout":{"type":"integer"}
+                },"required":["src","dst"]
+            }),
+        );
+        self.register(
+            "adb_pull",
+            "Pull a device file to the host (dst parent created, jailed).",
+            json!({
+                "type":"object","properties":{
+                    "src":{"type":"string","description":"device path"},
+                    "dst":{"type":"string","description":"in-root host path"},
+                    "serial":{"type":"string"},
+                    "timeout":{"type":"integer"}
+                },"required":["src","dst"]
+            }),
+        );
+        self.register("emulator", "Emulator control: list AVDs, or boot one as a detached background task (kill via /tasks). Boot runs outside bwrap (the emulator is itself a KVM VM).", json!({
+            "type":"object","properties":{
+                "action":{"type":"string","enum":["list","boot"]},
+                "avd":{"type":"string","description":"AVD name for boot (see list)"},
+                "wipe":{"type":"boolean","description":"-wipe-data"},
+                "no_snapshot":{"type":"boolean","description":"-no-snapshot (default true)"},
+                "wait":{"type":"boolean","description":"block until a new device appears + boot_completed"},
+                "timeout":{"type":"integer"}
+            },"required":[]
+        }));
+        self.register("gradle", "Run Gradle (project gradlew preferred, else gradle on PATH). Long builds: background:true detaches with task_id. Runs outside bwrap (needs SDK + ~/.gradle); project dir stays jailed.", json!({
+            "type":"object","properties":{
+                "dir":{"type":"string","description":"project dir with gradlew (default .)"},
+                "tasks":{"type":["string","array"],"description":"gradle tasks (default [assembleDebug])","items":{"type":"string"}},
+                "offline":{"type":"boolean","description":"--offline"},
+                "args":{"type":"array","description":"extra raw args","items":{"type":"string"}},
+                "background":{"type":"boolean"},
+                "timeout":{"type":"integer"}
+            },"required":[]
+        }));
     }
 
     pub fn all(&self) -> &[ToolDef] {
@@ -468,6 +553,15 @@ mod tests {
             "browser_open",
             "dev_serve",
             "viora",
+            "adb_devices",
+            "adb_shell",
+            "adb_install",
+            "adb_logcat",
+            "adb_push",
+            "adb_pull",
+            "adb_screenshot",
+            "emulator",
+            "gradle",
             "netlist_run",
             "netlist_validate",
             "netlist_to_schematic",

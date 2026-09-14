@@ -1,3 +1,26 @@
+/// Run a short diagnostic probe: Some((success, stdout)) or None on spawn
+/// failure / timeout. Callers check success themselves so a missing binary
+/// (non-zero exit) reads as "not found". Never blocks doctor.
+fn probe_output(program: &str, args: &[&str], secs: u64) -> Option<(bool, String)> {
+    use std::sync::mpsc;
+    let (tx, rx) = mpsc::channel();
+    let (program, args) = (
+        program.to_string(),
+        args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+    );
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&program).args(&args).output();
+        let _ = tx.send(out.ok());
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(secs)) {
+        Ok(Some(out)) => Some((
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+        )),
+        _ => None,
+    }
+}
+
 pub(crate) async fn cmd_doctor(config: Option<String>) -> anyhow::Result<()> {
     println!("VioraHarness doctor");
 
@@ -553,6 +576,85 @@ pub(crate) async fn cmd_doctor(config: Option<String>) -> anyhow::Result<()> {
                 "missing (optional — not bundled; use `xdotool search --onlyvisible --name <title>` or `xwininfo -root -tree` instead)"
             }
         );
+    }
+    {
+        println!("  android:");
+        let adb = vioraharness_core::tools::android::resolve_adb();
+        match probe_output(&adb, &["--version"], 10) {
+            Some((true, out)) => {
+                let first = out.lines().next().unwrap_or("").trim();
+                println!("    adb: {adb} ({first})");
+            }
+            _ => println!(
+                "    adb: not found (set ADB_BIN or ANDROID_HOME/ANDROID_SDK_ROOT, or put platform-tools on PATH)"
+            ),
+        }
+        match vioraharness_core::tools::android::sdk_root() {
+            Some(r) => println!("    sdk: {r} (from ANDROID_HOME/ANDROID_SDK_ROOT)"),
+            None => println!(
+                "    sdk: no ANDROID_HOME/ANDROID_SDK_ROOT (adb/emulator resolve via PATH)"
+            ),
+        }
+        let emu = vioraharness_core::tools::android::resolve_emulator();
+        let emu_ok = std::path::Path::new(&emu).exists() || {
+            std::env::var("PATH")
+                .map(|p| {
+                    p.split(':').any(|d| {
+                        !d.is_empty() && std::path::Path::new(&format!("{d}/emulator")).exists()
+                    })
+                })
+                .unwrap_or(false)
+        };
+        if emu_ok {
+            match probe_output(&emu, &["-list-avds"], 15) {
+                Some((true, out)) => {
+                    let avds: Vec<&str> = out
+                        .lines()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty())
+                        .collect();
+                    println!(
+                        "    emulator: {emu} — AVDs: {}",
+                        if avds.is_empty() {
+                            "(none)".into()
+                        } else {
+                            avds.join(", ")
+                        }
+                    );
+                }
+                _ => println!("    emulator: {emu} (AVD list timed out)"),
+            }
+        } else {
+            println!("    emulator: not found ($SDK/emulator/emulator or PATH)");
+        }
+        // Fast device poll; never fails doctor.
+        match probe_output(&adb, &["devices", "-l"], 10) {
+            Some((true, out)) => {
+                let devs = vioraharness_core::tools::android::parse_devices(&out);
+                if devs.is_empty() {
+                    println!("    devices: none attached (start an emulator or plug one in)");
+                } else {
+                    let list = devs
+                        .iter()
+                        .map(|d| format!("{} ({})", d.serial, d.state))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    println!("    devices: {list}");
+                }
+            }
+            _ => println!("    devices: (adb query failed or timed out)"),
+        }
+        let gradle_probe = ["gradle", "java"];
+        for bin in gradle_probe {
+            let found = std::env::var("PATH")
+                .map(|p| {
+                    p.split(':').any(|d| {
+                        !d.is_empty() && std::path::Path::new(&format!("{d}/{bin}")).exists()
+                    })
+                })
+                .unwrap_or(false);
+            println!("    {bin}: {}", if found { "found ✓" } else { "missing" });
+        }
     }
     let (mode, mode_src) = vioraharness_core::mode::resolve_mode_with_source(None);
     let mode_tools = vioraharness_core::mode::registry_for_mode(&mode)

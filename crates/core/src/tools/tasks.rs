@@ -81,6 +81,14 @@ pub fn log_path_for(id: &str) -> String {
 }
 
 pub fn spawn_task(command: &str, cwd: &str) -> BgTask {
+    spawn_task_opts(command, cwd, true)
+}
+
+/// Like [`spawn_task`], but `sandboxed=false` skips the bwrap wrapper with
+/// the caller's notice. Reserved for processes that are isolation
+/// boundaries themselves (emulator = KVM VM, Gradle = needs SDK/caches)
+/// where strict sandboxing would break hardware access or the build.
+pub fn spawn_task_opts(command: &str, cwd: &str, sandboxed: bool) -> BgTask {
     let id = new_id();
     let log_path = log_path_for(&id);
 
@@ -95,7 +103,11 @@ pub fn spawn_task(command: &str, cwd: &str) -> BgTask {
     cmd.current_dir(cwd);
     cmd.env("QT_QPA_PLATFORM", "offscreen");
 
-    crate::sandbox::apply_sandbox(&mut cmd, cwd);
+    if sandboxed {
+        crate::sandbox::apply_sandbox(&mut cmd, cwd);
+    } else {
+        tracing::warn!("background task {id} spawned without sandbox: {command}");
+    }
 
     let log_file = std::fs::OpenOptions::new()
         .append(true)
