@@ -118,6 +118,11 @@ impl App {
                 | "/skills"
                 | "/skill"
                 | "/theme"
+                | "/settings"
+                | "/setting"
+                | "/config"
+                | "/options"
+                | "/preferences"
                 | "/thinking"
                 | "/permissions"
                 | "/perms"
@@ -340,6 +345,11 @@ impl App {
                 | "/new-skill"
                 | "/skill-create"
                 | "/theme"
+                | "/settings"
+                | "/setting"
+                | "/config"
+                | "/options"
+                | "/preferences"
                 | "/thinking"
                 | "/permissions"
                 | "/perms"
@@ -594,6 +604,7 @@ mod tests {
             "/model",
             "/skills",
             "/theme",
+            "/settings",
             "/thinking",
             "/permissions",
             "/verbosity",
@@ -969,6 +980,7 @@ mod tests {
             "/skills",
             "/skill-new",
             "/theme",
+            "/settings",
             "/thinking",
             "/permissions",
             "/perms",

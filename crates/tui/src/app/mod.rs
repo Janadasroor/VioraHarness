@@ -15,6 +15,7 @@ mod markdown;
 mod msg;
 mod popups;
 mod render;
+pub(crate) mod settings;
 mod skills;
 #[cfg(test)]
 mod testkit;
@@ -56,6 +57,10 @@ pub struct App {
     pub(crate) thinking_title: String,
     pub(crate) thinking_label: String,
     pub(crate) show_thinking: bool,
+    /// Reasoning-depth dial (`off|minimal|low|medium|high|xhigh|max`).
+    /// Shown next to the model name; `Ctrl+T` cycles it. Flows into
+    /// every provider request via `resolve_thinking_level`.
+    pub(crate) thinking_level: String,
 
     pub(crate) tool_display_default: String,
     pub(crate) tool_display: std::collections::HashMap<String, String>,
@@ -65,6 +70,8 @@ pub struct App {
 
     pub(crate) theme_cursor: usize,
     pub(crate) available_themes: Vec<String>,
+
+    pub(crate) settings_cursor: usize,
 
     pub(crate) session_cursor: usize,
     pub(crate) task_cursor: usize,
@@ -927,10 +934,10 @@ impl App {
         }
         let db = std::env::var("VIORAHARNESS_DB")
             .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
-        let store = vioraharness_core::session::SessionStore::new(&db).ok()?;
-        let sess = store.get_session(sid).ok()??;
-        sess.mode
-            .filter(|m| vioraharness_core::mode::is_known_mode(m))
+        // Read-only lookup: never migrate/create here. App::new runs for
+        // every test_app(), and a migrating open would contend with the
+        // test that owns the temp DB file.
+        vioraharness_core::session::read_session_mode(&db, sid)
     }
 
     fn tool_verbosity(&self, name: &str) -> ToolVerbosity {
@@ -987,6 +994,21 @@ impl App {
         // and the /output viewer.
         if tname == "read" {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(content) {
+                // Surface real failures (e.g. `Is a directory`) instead of
+                // the generic hidden-lines placeholder.
+                if !ok {
+                    if let Some(e) = v.get("error").and_then(|x| x.as_str()) {
+                        if !e.is_empty() {
+                            return Some(truncate_chars(e, 200));
+                        }
+                    }
+                }
+                // Vision reads carry dims, not line counts — reuse the
+                // shared image summary (`path · WxH → vision`).
+                if v.get("base64").is_some() || v.get("base64_len").is_some() {
+                    let wide = verbosity == ToolVerbosity::Full;
+                    return Some(pretty_tool_result_wide(content, wide));
+                }
                 let path = v
                     .get("path")
                     .and_then(|x| x.as_str())
@@ -1007,8 +1029,17 @@ impl App {
                     }
                     return Some(format!("{path} ({t} lines)"));
                 }
+                // No line counts (bare read): show the path only,
+                // never leak content onto the card.
+                if ok {
+                    return Some(path);
+                }
             }
-            return Some("file read (lines hidden)".to_string());
+            return Some(if ok {
+                "file read".to_string()
+            } else {
+                truncate_chars(content, 200)
+            });
         }
         let wide = verbosity == ToolVerbosity::Full;
         let pretty = pretty_tool_result_wide(content, wide);
@@ -1358,6 +1389,7 @@ impl App {
             thinking_title,
             thinking_label,
             show_thinking,
+            thinking_level: vioraharness_core::thinking::resolve_thinking_level(),
             tool_display_default,
             tool_display,
             expanded_reasoning: HashSet::new(),
@@ -1374,6 +1406,7 @@ impl App {
                 "nord".into(),
                 "system".into(),
             ],
+            settings_cursor: 0,
             session_cursor: 0,
             task_cursor: 0,
             error_cursor: 0,
@@ -1632,11 +1665,7 @@ impl App {
                                         if *ln == name && *status == ToolStatus::Running {
                                             *la = args.clone();
                                             *lid = id.clone();
-                                            last.content = if pretty.is_empty() {
-                                                format!("→ {name}")
-                                            } else {
-                                                format!("→ {name} {pretty}")
-                                            };
+                                            last.content = String::new();
                                             coalesced = true;
                                         }
                                     }
@@ -1645,11 +1674,7 @@ impl App {
                             if !coalesced && verbosity != ToolVerbosity::Hidden {
                                 self.messages.push(Msg {
                                     role: "system".into(),
-                                    content: if pretty.is_empty() {
-                                        format!("→ {name}")
-                                    } else {
-                                        format!("→ {name} {pretty}")
-                                    },
+                                    content: String::new(),
                                     items: vec![Content::ToolCall {
                                         id: id.clone(),
                                         name: name.clone(),
@@ -2022,12 +2047,9 @@ impl App {
                         }
                         if k.code == KeyCode::Char('t')
                             && k.modifiers.contains(KeyModifiers::CONTROL)
+                            && (self.popup == Popup::None || self.popup == Popup::Settings)
                         {
-                            self.popup = if self.popup == Popup::ThemePicker {
-                                Popup::None
-                            } else {
-                                Popup::ThemePicker
-                            };
+                            self.cycle_thinking_level(1);
                             continue;
                         }
                         if k.code == KeyCode::F(12) {

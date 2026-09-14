@@ -96,9 +96,18 @@ fn openai_to_gemini(req: &ChatRequest) -> Value {
         }
     });
 
+    let level = crate::thinking::normalize_thinking_level(
+        req.thinking_level.as_deref().unwrap_or("medium"),
+    );
     let has_tools = req.tools.as_ref().map(|t| !t.is_empty()).unwrap_or(false);
-    if !has_tools {
-        body["generationConfig"]["thinkingConfig"] = json!({ "includeThoughts": true });
+    // Thoughts are dropped when tools ride along (the API rejects that
+    // combination); `off` drops the knob entirely.
+    if level != "off" && !has_tools {
+        let mut cfg = json!({ "includeThoughts": true });
+        if let Some(budget) = crate::thinking::native_thinking_budget(&level) {
+            cfg["thinkingBudget"] = json!(budget);
+        }
+        body["generationConfig"]["thinkingConfig"] = cfg;
     }
 
     if let Some(sys) = system_instruction {
@@ -444,6 +453,7 @@ mod tests {
             tool_choice: None,
             max_tokens: None,
             temperature: None,
+            thinking_level: None,
         }
     }
 
@@ -525,6 +535,30 @@ mod tests {
         let req = req_with(vec![m]);
         let body = openai_to_gemini(&req);
         assert_eq!(body["contents"][0]["parts"][0]["text"], json!("see"));
+    }
+
+    #[test]
+    fn thinking_budget_follows_level_and_off_drops_knob() {
+        let mut req = req_with(vec![ChatMessage::text("user", "hi")]);
+        // Unset dial keeps thoughts with the default budget.
+        let body = openai_to_gemini(&req);
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["includeThoughts"],
+            json!(true)
+        );
+        assert_eq!(
+            body["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            json!(8192)
+        );
+        req.thinking_level = Some("high".into());
+        let high = openai_to_gemini(&req);
+        assert_eq!(
+            high["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            json!(16384)
+        );
+        req.thinking_level = Some("off".into());
+        let off = openai_to_gemini(&req);
+        assert!(off["generationConfig"].get("thinkingConfig").is_none());
     }
 
     #[test]

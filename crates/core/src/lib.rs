@@ -11,6 +11,7 @@ pub mod sandbox;
 pub mod session;
 pub mod skills;
 pub mod subagent;
+pub mod thinking;
 pub mod tools;
 
 pub use loop_mod::AgentLoop;

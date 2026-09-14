@@ -29,6 +29,7 @@ impl App {
                 Popup::Tasks => " Background Tasks ",
                 Popup::Errors => " Errors ",
                 Popup::Rewind => " Rewind — restore checkpoint ",
+                Popup::Settings => " Settings ",
                 Popup::None => " ",
             })
             .border_style(Theme::popup_border())
@@ -50,7 +51,7 @@ impl App {
                 Line::from("  Ctrl-U/K   delete to start/end • Ctrl-W del word • Alt+D del next word"),
                 Line::from("  Ctrl-A/E   start/end • Ctrl-H backspace • Ctrl-D delete • Alt+B/F word move"),
                 Line::from("  Ctrl-V     paste text • Ctrl+Alt+V text only • Ctrl+V image → vision (pending)"),
-                Line::from("  Ctrl-G/O   toggle thinking • Ctrl-F search • Ctrl-L clear • Ctrl-T theme"),
+                Line::from("  Ctrl-G/O   toggle thinking • Ctrl-F search • Ctrl-L clear • Ctrl-T think level"),
                 Line::from("  Ctrl-X     expand/collapse long message • /compact now or auto at 80%"),
                 Line::from("  F1         this help • F2 providers • F9 tool output • F12 screenshot"),
                 Line::from("  F9/Shift+V /output  view last bash/tool full output (scroll for very long)"),
@@ -67,7 +68,8 @@ impl App {
                 Line::from("  /model <name>  switch model (e.g. provider/model-id from /model picker)"),
                 Line::from("  /mode [name]   switch agent mode — picker when bare (eda|web|android)"),
                 Line::from("  /theme [name]  switch theme (tokyonight[-soft]/eye-comfort/warm-dark/catppuccin/dracula/gruvbox/nord/system)"),
-                Line::from("  /thinking on/off  toggle thinking block (or Ctrl+O)"),
+                Line::from("  /settings    open settings — theme, mode, model, thinking, cards, tasks, compaction"),
+                Line::from("  /thinking on/off/<level>  reasoning display + depth (off|minimal|low|medium|high|xhigh|max, Ctrl+T cycles)"),
                 Line::from("  /undo      undo last file snapshot"),
                 Line::from("  /rewind    restore checkpoints at any message (dialog)"),
                 Line::from("  /compact   summarize + squash history (auto at 80%)"),
@@ -1152,6 +1154,51 @@ impl App {
                     ]));
                 }
                 } // else (has checkpoints)
+                lines
+            }
+            Popup::Settings => {
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    " Settings — saved at once (config + tui_state) ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                for i in 0..Self::settings_len() {
+                    let (label, value, hint) = self.settings_row(i);
+                    let is_selected = i == self.settings_cursor;
+                    let style = if is_selected {
+                        Theme::selection()
+                    } else {
+                        Style::default()
+                    };
+                    let star = if is_selected { "▶ " } else { "  " };
+                    let value_style = if i == settings::SETTINGS_THINK_LEVEL {
+                        Theme::think_level_style(&value)
+                    } else {
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::raw(star),
+                        Span::styled(
+                            format!("{label:<16}"),
+                            if is_selected {
+                                style.add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::White)
+                            },
+                        ),
+                        Span::styled(format!("{value:<14}"), value_style),
+                        Span::styled(
+                            hint,
+                            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " ↑/↓ or j/k move • ←/→ or h/l change • Enter select • Model opens picker • Esc close ",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
                 lines
             }
             Popup::None => vec![],

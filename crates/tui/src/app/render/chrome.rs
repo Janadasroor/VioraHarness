@@ -175,26 +175,39 @@ impl App {
 
     pub(crate) fn draw_input(&self, frame: &mut Frame, area: Rect) {
         let model_short = self.model.split('/').next_back().unwrap_or(&self.model);
+        let level = Span::styled(
+            self.thinking_level.clone(),
+            Theme::think_level_style(&self.thinking_level),
+        );
         let title = if self.busy {
-            format!(
-                " Input — {} [{}] (busy — Enter queues • $… ⚡ current turn • Esc cancels) ",
-                model_short,
-                self.mode.to_uppercase()
-            )
+            Line::from(vec![
+                Span::raw(format!(" Input — {model_short} · ")),
+                level,
+                Span::raw(format!(
+                    " [{}] (busy — Enter queues • $… ⚡ current turn • Esc cancels) ",
+                    self.mode.to_uppercase()
+                )),
+            ])
         } else if let Some(img) = &self.pending_image {
-            format!(
-                " Input — {} [{}] • [image {} pending] • Enter send • Esc clear ",
-                model_short,
-                self.mode.to_uppercase(),
-                img.label
-            )
+            Line::from(vec![
+                Span::raw(format!(" Input — {model_short} · ")),
+                level,
+                Span::raw(format!(
+                    " [{}] • [image {} pending] • Enter send • Esc clear ",
+                    self.mode.to_uppercase(),
+                    img.label
+                )),
+            ])
         } else {
-            format!(
-                " Input — {} [{}] • Enter send • Tab → {} • ↑/↓ history ",
-                model_short,
-                self.mode.to_uppercase(),
-                if self.mode == "plan" { "BUILD" } else { "PLAN" }
-            )
+            Line::from(vec![
+                Span::raw(format!(" Input — {model_short} · ")),
+                level,
+                Span::raw(format!(
+                    " [{}] • Enter send • Tab → {} • ↑/↓ history ",
+                    self.mode.to_uppercase(),
+                    if self.mode == "plan" { "BUILD" } else { "PLAN" }
+                )),
+            ])
         };
         let display_text = if self.input.text.is_empty() && !self.busy {
             "Type a prompt or /help for commands…"

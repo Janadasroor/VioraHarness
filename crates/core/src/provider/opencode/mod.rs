@@ -150,6 +150,7 @@ mod tests {
             tool_choice: None,
             max_tokens: None,
             temperature: None,
+            thinking_level: None,
         };
 
         let mut rx = prov
@@ -422,6 +423,7 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
             tool_choice: None,
             max_tokens: Some(20),
             temperature: Some(0.7),
+            thinking_level: None,
         };
         let body = chat_to_responses_body(&req, "gpt-test-1");
         assert_eq!(body["model"], json!("gpt-test-1"));
@@ -446,9 +448,66 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
             tool_choice: None,
             max_tokens: Some(20),
             temperature: Some(0.7),
+            thinking_level: None,
         };
         let body = chat_to_messages_body(&req, "claude-test-4-5");
         assert_eq!(body["model"], json!("claude-test-4-5"));
         assert!(body["messages"].is_array());
+    }
+
+    #[test]
+    fn responses_effort_follows_thinking_level() {
+        let mut req = ChatRequest {
+            model: "opencode/gpt-test-1".into(),
+            messages: vec![ChatMessage::text("user", "hello")],
+            tools: None,
+            tool_choice: None,
+            max_tokens: Some(20),
+            temperature: Some(0.7),
+            thinking_level: None,
+        };
+        // Unset dial keeps the provider default.
+        assert_eq!(
+            chat_to_responses_body(&req, "gpt-test-1")["reasoning"]["effort"],
+            json!("medium")
+        );
+        for (level, want) in [
+            ("off", "none"),
+            ("minimal", "minimal"),
+            ("low", "low"),
+            ("high", "high"),
+            ("xhigh", "xhigh"),
+            ("max", "max"),
+        ] {
+            req.thinking_level = Some(level.into());
+            assert_eq!(
+                chat_to_responses_body(&req, "gpt-test-1")["reasoning"]["effort"],
+                json!(want),
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn messages_thinking_budget_fits_under_output_limit() {
+        let mut req = ChatRequest {
+            model: "opencode/claude-test-4-5".into(),
+            messages: vec![ChatMessage::text("user", "hello")],
+            tools: None,
+            tool_choice: None,
+            max_tokens: Some(1024),
+            temperature: Some(0.7),
+            thinking_level: None,
+        };
+        // Unset dial behaves like medium.
+        let body = chat_to_messages_body(&req, "claude-test-4-5");
+        let budget = body["thinking"]["budget_tokens"].as_u64().unwrap();
+        let max_out = body["max_tokens"].as_u64().unwrap();
+        assert!(budget >= 1024 && budget < max_out);
+        // `off` restores the exact old shape: no knob, tiny ceiling.
+        req.thinking_level = Some("off".into());
+        let off = chat_to_messages_body(&req, "claude-test-4-5");
+        assert!(off.get("thinking").is_none());
+        assert_eq!(off["max_tokens"], json!(1024));
     }
 }

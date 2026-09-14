@@ -72,6 +72,15 @@ impl Provider for OpenRouterProvider {
         if let Value::Object(ref mut map) = body {
             map.insert("stream".into(), Value::Bool(true));
             map.insert("include_reasoning".into(), Value::Bool(true));
+            let level = crate::thinking::normalize_thinking_level(
+                req.thinking_level.as_deref().unwrap_or("medium"),
+            );
+            let effort: &str = if level == "off" {
+                "none"
+            } else {
+                level.as_str()
+            };
+            map.insert("reasoning".into(), serde_json::json!({"effort": effort}));
 
             if !map.contains_key("max_tokens") {
                 map.insert(

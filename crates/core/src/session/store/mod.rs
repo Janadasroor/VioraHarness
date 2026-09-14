@@ -58,7 +58,15 @@ impl SessionStore {
         if let Some(parent) = std::path::Path::new(&expanded).parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let manager = SqliteConnectionManager::file(&expanded);
+        // Every pooled connection needs WAL + busy_timeout, not just the
+        // first one: without `with_init` the remaining pool connections
+        // fail immediately with "database is locked" under parallel
+        // writers (e.g. TUI tests opening a second store to the same file).
+        let manager = SqliteConnectionManager::file(&expanded).with_init(|c| {
+            c.execute_batch(
+                "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;",
+            )
+        });
         let pool = Pool::builder()
             .max_size(8)
             .build(manager)
@@ -227,6 +235,30 @@ impl SessionStore {
         let hash = format!("{:x}", md5ish(&cwd));
         (cwd, hash)
     }
+}
+
+/// Read-only session mode lookup without migrations or pool writes.
+/// Used by TUI startup (`last_opened_chat_mode`) so constructing an `App`
+/// in tests never migrates — or contends on — another test's temp DB.
+pub fn read_session_mode(db_path: &str, session_id: &str) -> Option<String> {
+    let expanded = shellexpand_path(db_path);
+    if !std::path::Path::new(&expanded).exists() {
+        return None;
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &expanded,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()?;
+    let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
+    let mode: Option<String> = conn
+        .query_row(
+            "SELECT mode FROM sessions WHERE id = ?1",
+            rusqlite::params![session_id],
+            |r| r.get(0),
+        )
+        .ok()?;
+    mode.filter(|m| crate::mode::is_known_mode(m))
 }
 
 fn shellexpand_path(p: &str) -> String {

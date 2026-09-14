@@ -274,6 +274,7 @@ impl AgentLoop {
                         tool_choice: None,
                         max_tokens: Some(20),
                         temperature: Some(0.5),
+                        thinking_level: None,
                     };
                     let title = match provider.stream(req).await {
                         Ok(mut rx) => {
@@ -366,6 +367,7 @@ impl AgentLoop {
                     tool_choice: None,
                     max_tokens: Some(1024),
                     temperature: Some(0.7),
+                    thinking_level: None,
                 };
                 let mut summary = String::new();
                 match provider.stream(summary_req).await {
@@ -494,6 +496,7 @@ impl AgentLoop {
                 tool_choice: Some("auto".into()),
                 max_tokens: Some(1024),
                 temperature: Some(0.7),
+                thinking_level: Some(crate::thinking::resolve_thinking_level()),
             };
 
             tracing::info!(
@@ -558,6 +561,7 @@ impl AgentLoop {
                         tool_choice: Some("auto".into()),
                         max_tokens: Some(1024),
                         temperature: Some(0.7),
+                        thinking_level: Some(crate::thinking::resolve_thinking_level()),
                     };
                     provider.stream(req2).await?
                 }

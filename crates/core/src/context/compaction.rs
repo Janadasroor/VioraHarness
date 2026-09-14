@@ -180,6 +180,7 @@ pub async fn summarize_head(
         tool_choice: None,
         max_tokens: Some(2048),
         temperature: Some(0.3),
+        thinking_level: None,
     };
     match provider.complete(req).await {
         Ok(s) if !s.trim().is_empty() => s.trim().to_string(),

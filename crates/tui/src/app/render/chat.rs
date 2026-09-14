@@ -76,26 +76,30 @@ impl App {
                 let raw_lines: Vec<&str> = joined.iter().map(|s| s.as_str()).collect();
 
                 if raw_lines.is_empty() {
-                    let mut spans = markdown_inline_spans(&raw);
-                    if let Some(q) = &self.chat_search {
-                        if !q.is_empty() && raw.to_lowercase().contains(&q.to_lowercase()) {
-                            spans = vec![Span::styled(
-                                raw.clone(),
-                                Style::default()
-                                    .fg(Color::Yellow)
-                                    .bg(Color::Rgb(50, 50, 30))
-                                    .add_modifier(Modifier::BOLD),
-                            )];
+                    // Tool-only assistant turn: skip the empty `●` line,
+                    // tool cards below carry the content.
+                    if !(raw.trim().is_empty() && !m.items.is_empty()) {
+                        let mut spans = markdown_inline_spans(&raw);
+                        if let Some(q) = &self.chat_search {
+                            if !q.is_empty() && raw.to_lowercase().contains(&q.to_lowercase()) {
+                                spans = vec![Span::styled(
+                                    raw.clone(),
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .bg(Color::Rgb(50, 50, 30))
+                                        .add_modifier(Modifier::BOLD),
+                                )];
+                            }
                         }
+                        let mut line_spans = Vec::new();
+                        line_spans.push(Span::styled(prefix, style));
+                        line_spans.extend(spans);
+                        line_spans.push(time);
+                        if self.busy && !self.streaming_buf.is_empty() {
+                            line_spans.push(Span::styled(" ▌", Style::default().fg(Color::Yellow)));
+                        }
+                        all_lines.push(Line::from(line_spans));
                     }
-                    let mut line_spans = Vec::new();
-                    line_spans.push(Span::styled(prefix, style));
-                    line_spans.extend(spans);
-                    line_spans.push(time);
-                    if self.busy && !self.streaming_buf.is_empty() {
-                        line_spans.push(Span::styled(" ▌", Style::default().fg(Color::Yellow)));
-                    }
-                    all_lines.push(Line::from(line_spans));
                 } else {
                     let table_max_width = (area.width as usize).saturating_sub(4).max(20);
                     let code_max = code_inner_max(area.width as usize);
@@ -338,51 +342,57 @@ impl App {
                         display = format!("{display} {rest}");
                     }
                 }
-                let is_error_msg = m.role == "system"
-                    && (display.to_lowercase().contains("error")
-                        || display.contains("✖")
-                        || display.contains("denied")
-                        || display.contains("blocked")
-                        || display.contains("FILE NOT CREATED")
-                        || display.contains("failed"));
-                let is_code = display.trim_start().starts_with("```") || raw.contains("```");
-                let mut content_span = if is_code {
-                    Span::styled(
-                        display.clone(),
-                        Style::default()
-                            .bg(Color::Rgb(49, 50, 68))
-                            .fg(Color::Rgb(205, 214, 244)),
-                    )
-                } else if is_error_msg {
-                    Span::styled(display.clone(), crate::theme::Theme::error_message())
-                } else if m.role == "user" {
-                    Span::styled(display.clone(), Theme::user_message())
+                // Live tool-call holder (content cleared at emit time):
+                // skip the empty `·` line, cards below are the content.
+                if display.trim().is_empty() && !m.items.is_empty() {
+                    // Fall through to tool-card rendering below.
                 } else {
-                    Span::raw(display.clone())
-                };
-                if let Some(q) = &self.chat_search {
-                    if !q.is_empty() && display.to_lowercase().contains(&q.to_lowercase()) {
-                        content_span = Span::styled(
+                    let is_error_msg = m.role == "system"
+                        && (display.to_lowercase().contains("error")
+                            || display.contains("✖")
+                            || display.contains("denied")
+                            || display.contains("blocked")
+                            || display.contains("FILE NOT CREATED")
+                            || display.contains("failed"));
+                    let is_code = display.trim_start().starts_with("```") || raw.contains("```");
+                    let mut content_span = if is_code {
+                        Span::styled(
                             display.clone(),
                             Style::default()
-                                .fg(Color::Yellow)
-                                .bg(Color::Rgb(50, 50, 30))
-                                .add_modifier(Modifier::BOLD),
-                        );
+                                .bg(Color::Rgb(49, 50, 68))
+                                .fg(Color::Rgb(205, 214, 244)),
+                        )
+                    } else if is_error_msg {
+                        Span::styled(display.clone(), crate::theme::Theme::error_message())
+                    } else if m.role == "user" {
+                        Span::styled(display.clone(), Theme::user_message())
+                    } else {
+                        Span::raw(display.clone())
+                    };
+                    if let Some(q) = &self.chat_search {
+                        if !q.is_empty() && display.to_lowercase().contains(&q.to_lowercase()) {
+                            content_span = Span::styled(
+                                display.clone(),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .bg(Color::Rgb(50, 50, 30))
+                                    .add_modifier(Modifier::BOLD),
+                            );
+                        }
                     }
+                    let effective_prefix = if is_error_msg { "✖ " } else { prefix };
+                    let effective_style = if is_error_msg {
+                        crate::theme::Theme::error_prefix()
+                    } else {
+                        style
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(effective_prefix, effective_style),
+                        content_span,
+                        time,
+                    ]);
+                    all_lines.push(line);
                 }
-                let effective_prefix = if is_error_msg { "✖ " } else { prefix };
-                let effective_style = if is_error_msg {
-                    crate::theme::Theme::error_prefix()
-                } else {
-                    style
-                };
-                let line = Line::from(vec![
-                    Span::styled(effective_prefix, effective_style),
-                    content_span,
-                    time,
-                ]);
-                all_lines.push(line);
             }
 
             let tool_names: std::collections::HashMap<&str, &str> = m
@@ -485,10 +495,12 @@ impl App {
                             crate::theme::Theme::error_message()
                         };
 
+                        // Call line already carries `· #id` — result keeps
+                        // the name only to avoid showing the id twice.
                         let label: String = if tname.is_empty() {
                             format!("#{}", short_tool_id(id))
                         } else {
-                            format!("{} · #{}", tname, short_tool_id(id))
+                            tname.to_string()
                         };
                         let head = format!("{icon} {label} ");
                         let expanded = self.expanded_messages.contains(&(abs_idx, Some(ii)));

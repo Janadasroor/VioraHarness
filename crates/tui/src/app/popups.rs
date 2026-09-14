@@ -17,14 +17,27 @@ impl App {
                 }
                 KeyCode::Enter => {
                     let name = self.available_themes[self.theme_cursor].clone();
-                    Self::save_tui_state(serde_json::json!({"last_theme": name}));
+                    super::settings::persist_theme_to_config(&name);
                     self.messages.push(Msg::new(
                         "system",
-                        format!("Theme → {} (saved, restart TUI to apply palette)", name),
+                        format!("Theme → {name} (saved, applied)"),
                     ));
                     self.popup = Popup::None;
                 }
                 KeyCode::Esc => self.popup = Popup::None,
+                _ => {}
+            },
+            Popup::Settings => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => self.settings_move(-1),
+                KeyCode::Down | KeyCode::Char('j') => self.settings_move(1),
+                KeyCode::Home => self.settings_cursor = 0,
+                KeyCode::End => self.settings_cursor = Self::settings_len() - 1,
+                KeyCode::PageUp => self.settings_move(-4),
+                KeyCode::PageDown => self.settings_move(4),
+                KeyCode::Left | KeyCode::Char('h') => self.settings_cycle(-1),
+                KeyCode::Right | KeyCode::Char('l') => self.settings_cycle(1),
+                KeyCode::Enter | KeyCode::Char(' ') => self.settings_activate(),
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => self.popup = Popup::None,
                 _ => {}
             },
             Popup::ModePicker => match key.code {

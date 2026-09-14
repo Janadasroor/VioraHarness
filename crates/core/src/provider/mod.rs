@@ -146,6 +146,11 @@ pub struct ChatRequest {
     pub max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
+    /// Reasoning-depth dial (`off|minimal|low|medium|high|xhigh|max`).
+    /// Never serialized directly — each body builder maps it onto the
+    /// vendor's own knob. `None` means the provider default.
+    #[serde(default, skip_serializing)]
+    pub thinking_level: Option<String>,
 }
 
 #[async_trait::async_trait]

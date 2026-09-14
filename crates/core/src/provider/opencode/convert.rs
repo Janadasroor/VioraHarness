@@ -92,13 +92,21 @@ pub(crate) fn chat_to_responses_body(req: &ChatRequest, bare_model: &str) -> Val
         }
     }
 
+    let level = crate::thinking::normalize_thinking_level(
+        req.thinking_level.as_deref().unwrap_or("medium"),
+    );
+    let effort: &str = if level == "off" {
+        "none"
+    } else {
+        level.as_str()
+    };
     let mut body = json!({
         "model": bare_model,
         "input": input,
         "stream": true,
         "store": false,
         "parallel_tool_calls": true,
-        "reasoning": {"effort": "medium"},
+        "reasoning": {"effort": effort},
         "text": {"verbosity": "low"}
     });
 
@@ -226,12 +234,30 @@ pub(crate) fn chat_to_messages_body(req: &ChatRequest, bare_model: &str) -> Valu
         }
     }
 
+    let level = crate::thinking::normalize_thinking_level(
+        req.thinking_level.as_deref().unwrap_or("medium"),
+    );
+    // Extended thinking needs headroom the 1024-token turn default
+    // cannot give (budget must sit below the output limit), so the
+    // ceiling grows with the budget — same idea as the Responses
+    // 16k floor. `off` keeps the exact old shape.
+    let mut max_out = req.max_tokens.unwrap_or(1024);
+    let mut thinking: Option<Value> = None;
+    if level != "off" {
+        if let Some(budget) = crate::thinking::thinking_budget(max_out.max(4096), &level) {
+            max_out = max_out.max(budget + 1024);
+            thinking = Some(json!({"type": "enabled", "budget_tokens": budget}));
+        }
+    }
     let mut body = json!({
         "model": bare_model,
         "messages": messages,
         "stream": true,
-        "max_tokens": req.max_tokens.unwrap_or(1024)
+        "max_tokens": max_out
     });
+    if let Some(t) = thinking {
+        body["thinking"] = t;
+    }
     if let Some(s) = system {
         body["system"] = json!(s);
     }

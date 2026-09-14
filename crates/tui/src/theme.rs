@@ -146,6 +146,38 @@ impl Palette {
                 }
             }
         }
+        // Minimal configs (or a bare name switch) carry no palette object:
+        // resolve the `tui.theme` name to a built-in palette.
+        for cand in vioraharness_core::loop_mod::config_candidates() {
+            if let Some(v) = cached_json(&cand) {
+                if let Some(name) = v
+                    .get("tui")
+                    .and_then(|t| t.get("theme"))
+                    .and_then(|x| x.as_str())
+                {
+                    if !name.trim().is_empty() && !name.eq_ignore_ascii_case("system") {
+                        return Self::from_name(name);
+                    }
+                }
+            }
+        }
+        // `tui_state.json` last_theme (written by /theme and Settings) wins
+        // over the default when no config name exists yet.
+        let base = std::env::var("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                std::path::PathBuf::from(home).join(".local/share")
+            });
+        if let Ok(s) = std::fs::read_to_string(base.join("vioraharness/tui_state.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&s) {
+                if let Some(name) = v.get("last_theme").and_then(|x| x.as_str()) {
+                    if !name.trim().is_empty() && !name.eq_ignore_ascii_case("system") {
+                        return Self::from_name(name);
+                    }
+                }
+            }
+        }
         Self::tokyonight()
     }
 
@@ -503,6 +535,24 @@ impl Theme {
             .fg(hex_to_color(&p.text))
     }
 
+    /// Heat-ramp color for the reasoning-depth chip (`off`, `minimal`,
+    /// `low`, `medium`, `high`, `xhigh`, `max`): dim when idle, hot
+    /// when deep, so the active level reads at a glance next to the
+    /// model name.
+    pub fn think_level_style(level: &str) -> Style {
+        let color = match vioraharness_core::thinking::normalize_thinking_level(level).as_str() {
+            "off" => Color::DarkGray,
+            "minimal" => Color::Green,
+            "low" => Color::Cyan,
+            "medium" => Color::Yellow,
+            "high" => Color::Magenta,
+            "xhigh" => Color::LightRed,
+            "max" => Color::Red,
+            _ => Color::Yellow,
+        };
+        Style::default().fg(color).add_modifier(Modifier::BOLD)
+    }
+
     pub fn code_block() -> Style {
         let p = Self::palette();
         Style::default()
@@ -700,6 +750,37 @@ mod tests {
         assert!(
             !s.add_modifier.contains(Modifier::BOLD),
             "thinking header must not use the bold of real labels"
+        );
+    }
+
+    #[test]
+    fn think_level_style_heat_ramp() {
+        use ratatui::style::Modifier;
+        for (level, want) in [
+            ("off", Color::DarkGray),
+            ("minimal", Color::Green),
+            ("low", Color::Cyan),
+            ("medium", Color::Yellow),
+            ("high", Color::Magenta),
+            ("xhigh", Color::LightRed),
+            ("max", Color::Red),
+        ] {
+            let s = Theme::think_level_style(level);
+            assert_eq!(s.fg, Some(want), "level {level}");
+            assert!(
+                s.add_modifier.contains(Modifier::BOLD),
+                "chip stays bold: {level}"
+            );
+        }
+        assert_eq!(
+            Theme::think_level_style("HIGH").fg,
+            Some(Color::Magenta),
+            "case-insensitive"
+        );
+        assert_eq!(
+            Theme::think_level_style("bogus").fg,
+            Some(Color::Yellow),
+            "unknown falls back to the default level color"
         );
     }
 }

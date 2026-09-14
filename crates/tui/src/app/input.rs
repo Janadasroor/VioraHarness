@@ -205,10 +205,11 @@ impl InputState {
     /// Production constructor: history restored from disk, every push
     /// saved back. Arrow-key navigation then works across restarts.
     pub(crate) fn with_disk_history() -> Self {
-        let mut s = Self::default();
-        s.history = Self::load_history();
-        s.persist = true;
-        s
+        Self {
+            history: Self::load_history(),
+            persist: true,
+            ..Self::default()
+        }
     }
 
     pub(crate) fn history_path() -> std::path::PathBuf {
@@ -309,7 +310,14 @@ impl InputState {
                 "/theme",
                 "switch theme — /theme <name> or /theme for picker",
             ),
-            ("/thinking", "toggle thinking — /thinking on/off"),
+            (
+                "/settings",
+                "open settings — theme, mode, model, thinking, cards, tasks, compaction",
+            ),
+            (
+                "/thinking",
+                "display toggle + depth — /thinking on/off/low/medium/high/…",
+            ),
             (
                 "/verbosity",
                 "tool card verbosity — /verbosity [tool] <hidden|quiet|compact|full>",

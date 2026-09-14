@@ -158,10 +158,10 @@ impl App {
                     let name = parts[1].to_lowercase();
 
                     if self.available_themes.iter().any(|t| t == &name) {
-                        Self::save_tui_state(serde_json::json!({"last_theme": name}));
+                        super::settings::persist_theme_to_config(&name);
                         self.messages.push(Msg::new(
                             "system",
-                            format!("Theme → {} (saved, restart TUI to apply palette)", name),
+                            format!("Theme → {name} (saved, applied)"),
                         ));
                     } else {
                         self.popup = Popup::ThemePicker;
@@ -170,39 +170,61 @@ impl App {
                     self.popup = Popup::ThemePicker;
                 }
             }
+            "/settings" | "/setting" | "/config" | "/options" | "/preferences" => {
+                self.open_settings();
+            }
             "/thinking" => {
                 if parts.len() > 1 {
-                    match parts[1].to_lowercase().as_str() {
-                        "on" | "true" | "show" => {
-                            self.show_thinking = true;
-                            self.thinking_expanded = true;
-                            Self::save_tui_state(serde_json::json!({"show_thinking": true}));
-                            self.messages.push(Msg::new(
-                                "system",
-                                format!(
-                                    "Thinking ON ({} / {}) — saved",
-                                    self.thinking_title, self.thinking_label
-                                ),
-                            ));
-                        }
-                        "off" | "false" | "hide" => {
-                            self.show_thinking = false;
-                            Self::save_tui_state(serde_json::json!({"show_thinking": false}));
-                            self.messages
-                                .push(Msg::new("system", "Thinking OFF — saved"));
-                        }
-                        _ => {
-                            self.show_thinking = !self.show_thinking;
-                            Self::save_tui_state(
-                                serde_json::json!({"show_thinking": self.show_thinking}),
-                            );
-                            self.messages.push(Msg::new(
-                                "system",
-                                format!(
-                                    "Thinking {} — saved",
-                                    if self.show_thinking { "ON" } else { "OFF" }
-                                ),
-                            ));
+                    let arg = parts[1].to_lowercase();
+                    // Capability dial first (`none` maps to `off`); the
+                    // bare display words keep their legacy meaning.
+                    if vioraharness_core::thinking::is_known_thinking_level(&arg)
+                        && !matches!(
+                            arg.as_str(),
+                            "on" | "true" | "show" | "off" | "false" | "hide"
+                        )
+                    {
+                        let level = vioraharness_core::thinking::normalize_thinking_level(&arg);
+                        self.thinking_level = level.clone();
+                        super::settings::persist_thinking_level(&level);
+                        self.messages.push(Msg::new(
+                            "system",
+                            format!("think level → {level} (new turns, saved)"),
+                        ));
+                    } else {
+                        match arg.as_str() {
+                            "on" | "true" | "show" => {
+                                self.show_thinking = true;
+                                self.thinking_expanded = true;
+                                Self::save_tui_state(serde_json::json!({"show_thinking": true}));
+                                self.messages.push(Msg::new(
+                                    "system",
+                                    format!(
+                                        "Thinking ON ({} / {}) — saved",
+                                        self.thinking_title, self.thinking_label
+                                    ),
+                                ));
+                            }
+                            "off" | "false" | "hide" => {
+                                self.show_thinking = false;
+                                Self::save_tui_state(serde_json::json!({"show_thinking": false}));
+                                self.messages
+                                    .push(Msg::new("system", "Thinking OFF — saved"));
+                            }
+                            _ => {
+                                self.show_thinking = !self.show_thinking;
+                                Self::save_tui_state(
+                                    serde_json::json!({"show_thinking": self.show_thinking}),
+                                );
+                                self.messages.push(Msg::new(
+                                    "system",
+                                    format!(
+                                        "Thinking {} (level {}) — /thinking <off|minimal|low|medium|high|xhigh|max> sets depth — saved",
+                                        if self.show_thinking { "ON" } else { "OFF" },
+                                        self.thinking_level,
+                                    ),
+                                ));
+                            }
                         }
                     }
                 } else {
@@ -212,10 +234,11 @@ impl App {
                     self.messages.push(Msg::new(
                         "system",
                         format!(
-                            "Thinking {} ({} / {}) — Ctrl+G to toggle expand — saved",
+                            "Thinking {} ({} / {}, level {}) — Ctrl+G to toggle expand, Ctrl+T cycles depth — saved",
                             if self.show_thinking { "ON" } else { "OFF" },
                             self.thinking_title,
-                            self.thinking_label
+                            self.thinking_label,
+                            self.thinking_level,
                         ),
                     ));
                 }

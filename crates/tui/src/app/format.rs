@@ -617,12 +617,9 @@ pub(crate) fn pretty_tool_result_wide(content: &str, wide: bool) -> String {
                     .collect::<Vec<_>>()
                     .join(" | ");
                 let mut preview = truncate_chars(shown_lines.trim(), 200);
+                // Full log path stays in the result JSON for the V viewer;
+                // the card only needs the counts, not `~/...log` noise.
                 let log_path = obj.get("log").and_then(|x| x.as_str()).unwrap_or("");
-                let log_hint = if !log_path.is_empty() {
-                    format!(" log: {}", rel_path(log_path))
-                } else {
-                    String::new()
-                };
 
                 let is_truncated = content.contains("...(truncated)")
                     || combined.len() > 7000
@@ -636,20 +633,12 @@ pub(crate) fn pretty_tool_result_wide(content: &str, wide: bool) -> String {
                 if is_truncated {
                     let remaining = total_lines.saturating_sub(3);
                     if remaining > 0 {
-                        preview = format!(
-                            "{preview} … (+{} lines, {} chars total — press V for full{} )",
-                            remaining,
-                            combined.len(),
-                            log_hint
-                        );
+                        preview = format!("{preview} … (+{remaining} — V for full)");
                     } else {
-                        preview =
-                            format!("{preview} … (truncated — press V for full{} )", log_hint);
+                        preview = format!("{preview} … (truncated — V for full)");
                     }
                 } else if total_lines > 1 {
-                    preview = format!("{preview} ({} lines{})", total_lines, log_hint);
-                } else if !log_hint.is_empty() {
-                    preview = format!("{preview}{}", log_hint);
+                    preview = format!("{preview} ({total_lines} lines)");
                 }
                 return preview;
             }

@@ -520,6 +520,9 @@ impl App {
 
     pub(crate) fn popup_wheel(&mut self, dir: i32) {
         match self.popup {
+            Popup::Settings => {
+                self.settings_move(dir);
+            }
             Popup::ModelPicker => {
                 let len = self.model_filtered_len();
                 if len == 0 {

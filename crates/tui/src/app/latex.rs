@@ -1017,11 +1017,11 @@ fn place_str(line: &mut String, s: &str, col: usize) {
 
 fn bold_char(c: char) -> Option<char> {
     let cp = c as u32;
-    let mapped = if ('A'..='Z').contains(&c) {
+    let mapped = if c.is_ascii_uppercase() {
         0x1D400 + (cp - 'A' as u32)
-    } else if ('a'..='z').contains(&c) {
+    } else if c.is_ascii_lowercase() {
         0x1D41A + (cp - 'a' as u32)
-    } else if ('0'..='9').contains(&c) {
+    } else if c.is_ascii_digit() {
         0x1D7CE + (cp - '0' as u32)
     } else {
         return None;
@@ -1096,10 +1096,8 @@ fn is_display_op(base: &Canvas) -> bool {
 /// Centered stack for a display operator with above/below limits.
 fn center_stack(base: Canvas, above: Option<Canvas>, below: Option<Canvas>) -> Canvas {
     let mut w = base.width().max(1);
-    for opt in [&above, &below] {
-        if let Some(c) = opt {
-            w = w.max(c.width());
-        }
+    for c in [&above, &below].into_iter().flatten() {
+        w = w.max(c.width());
     }
     let center = |c: &Canvas| {
         let mut rows = Vec::new();
@@ -1704,7 +1702,7 @@ impl MathParser {
                             .map(|ch| {
                                 script_capital(ch)
                                     .or_else(|| {
-                                        if ('a'..='z').contains(&ch) {
+                                        if ch.is_ascii_lowercase() {
                                             char::from_u32(0x1D4B6 + (ch as u32 - 'a' as u32))
                                         } else {
                                             None

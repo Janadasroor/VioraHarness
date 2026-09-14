@@ -122,8 +122,11 @@ pub(crate) fn with_temp_db(
     let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let db = std::env::temp_dir().join(format!("vh_tuidb_{tag}_{}_{n}", std::process::id()));
     let _ = std::fs::remove_file(&db);
-    for ext in ["wal", "shm", "journal"] {
-        let _ = std::fs::remove_file(db.with_extension(format!("db-{ext}")));
+    // SQLite sidecars are `<db>-wal` / `<db>-shm` (suffix, not extension).
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = db.clone().into_os_string();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(sidecar);
     }
     let prev = std::env::var("VIORAHARNESS_DB").ok();
     std::env::set_var("VIORAHARNESS_DB", &db);
@@ -136,8 +139,10 @@ pub(crate) fn restore_db_env(prev: Option<String>, db: &std::path::Path) {
         None => std::env::remove_var("VIORAHARNESS_DB"),
     }
     let _ = std::fs::remove_file(db);
-    for ext in ["wal", "shm", "journal"] {
-        let _ = std::fs::remove_file(db.with_extension(format!("db-{ext}")));
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let mut sidecar = db.as_os_str().to_owned();
+        sidecar.push(suffix);
+        let _ = std::fs::remove_file(sidecar);
     }
 }
 

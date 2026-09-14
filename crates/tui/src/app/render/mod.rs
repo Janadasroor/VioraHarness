@@ -496,8 +496,8 @@ mod tests {
             "call title is Name + summary + ID: {text}"
         );
         assert!(
-            text.contains("✔ bash · #def456"),
-            "result title carries Name + ID: {text}"
+            text.contains("✔ bash"),
+            "result title carries Name (id lives on the call line): {text}"
         );
         assert!(!text.contains("call_abc"), "raw provider id hidden: {text}");
     }
@@ -535,6 +535,99 @@ mod tests {
         assert!(text.contains("+ new line here"), "added line on card");
         assert!(text.contains("- old line here"), "removed line on card");
         assert!(text.contains("+2 more"), "remainder hint on card");
+    }
+
+    #[test]
+    fn live_tool_holder_renders_single_card() {
+        let mut app = test_app();
+        let mut m = Msg::new("system", String::new());
+        m.timestamp = "13:48".into();
+        m.items.push(Content::ToolCall {
+            id: "call_live_1".into(),
+            name: "bash".into(),
+            args: "{\"command\": \"ls -R\"}".into(),
+            status: ToolStatus::Running,
+        });
+        app.messages.push(m);
+        let text = render_text(&mut app, 100, 20);
+        assert!(!text.contains("→ bash"), "no duplicated arrow line: {text}");
+        assert!(
+            !text.contains("13:48"),
+            "no timestamp on tool cards: {text}"
+        );
+        assert_eq!(
+            text.matches("bash").count(),
+            1,
+            "single card, not call+dup: {text}"
+        );
+    }
+
+    #[test]
+    fn tool_only_assistant_hides_empty_prefix() {
+        let mut app = test_app();
+        let mut m = Msg::new("assistant", String::new());
+        m.timestamp = "13:48".into();
+        m.items.push(Content::ToolCall {
+            id: "call_abc123def456".into(),
+            name: "bash".into(),
+            args: "{\"command\": \"npm test\"}".into(),
+            status: ToolStatus::Done,
+        });
+        m.items.push(Content::ToolResult {
+            id: "call_abc123def456".into(),
+            content: "{\"ok\":true,\"code\":0,\"stdout\":\"ok\"}".into(),
+            ok: true,
+        });
+        app.messages.push(m);
+        let text = render_text(&mut app, 100, 20);
+        assert!(
+            !text.contains("13:48"),
+            "tool-only turn has no empty prefix line"
+        );
+        assert!(text.contains("● bash · npm test · #def456"), "{text}");
+        assert!(text.contains("✔ bash"), "{text}");
+    }
+
+    #[test]
+    fn read_directory_error_surfaces() {
+        let app = test_app();
+        let items = vec![Content::ToolCall {
+            id: "call_read_dir".into(),
+            name: "read".into(),
+            args: "{\"path\": \"tmp/viora-os/src\"}".into(),
+            status: ToolStatus::Error,
+        }];
+        let content =
+            serde_json::json!({"ok": false, "error": "Is a directory (os error 21)"}).to_string();
+        let preview = app
+            .tool_result_preview(&items, "call_read_dir", &content, false)
+            .expect("error previews");
+        assert!(
+            preview.contains("Is a directory"),
+            "real error, not placeholder: {preview}"
+        );
+        assert!(
+            !preview.contains("lines hidden"),
+            "placeholder gone: {preview}"
+        );
+    }
+
+    #[test]
+    fn bash_log_hint_is_short() {
+        let stdout = (0..10)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let res = serde_json::json!({
+            "ok": true, "code": 0, "stdout": stdout,
+            "log": "/home/jnd/.local/share/vioraharness/logs/bash_1.log",
+            "truncated": true,
+        })
+        .to_string();
+        let pretty = pretty_tool_result_wide(&res, false);
+        assert!(pretty.contains("V for full"), "hint kept: {pretty}");
+        assert!(!pretty.contains("chars total"), "no char count: {pretty}");
+        assert!(!pretty.contains(".log"), "no log path noise: {pretty}");
     }
 
     #[test]

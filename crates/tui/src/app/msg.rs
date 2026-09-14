@@ -112,4 +112,5 @@ pub(crate) enum Popup {
     Tasks,
     Errors,
     Rewind,
+    Settings,
 }
