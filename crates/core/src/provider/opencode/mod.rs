@@ -273,6 +273,35 @@ event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{
         );
     }
 
+    #[tokio::test]
+    async fn responses_reasoning_text_delta_reaches_label() {
+        // Models/gateways that stream full reasoning text (not summaries)
+        // must still feed the thinking block — previously these deltas
+        // were dropped, so thinking vanished the moment the turn ended.
+        let raw = b"event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\"Weigh\"}\n\n\
+event: response.reasoning_text.delta\ndata: {\"type\":\"response.reasoning_text.delta\",\"delta\":\" options\"}\n\n\
+event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"done\"}\n\n\
+event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"Weigh options\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"done\"}]}]}}\n\n".to_vec();
+        for chunk in [1, 7, 64] {
+            let evs = replay_sse(raw.clone(), chunk).await;
+            let (text, reasoning) = replay_text(&evs);
+            assert_eq!(text, "done", "chunk {chunk}: message text once: {text:?}");
+            assert_eq!(
+                reasoning, "Weigh options",
+                "chunk {chunk}: live reasoning deltas, no completed dup: {reasoning:?}"
+            );
+        }
+
+        // Fallback shape: full reasoning text under content[].
+        let raw2 = b"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"content\":[{\"type\":\"reasoning_text\",\"text\":\"Late think\"}]},{\"type\":\"message\",\"content\":[{\"type\":\"output_text\",\"text\":\"hi\"}]}]}}\n\n".to_vec();
+        let evs2 = replay_sse(raw2.clone(), 64).await;
+        let (_, reasoning2) = replay_text(&evs2);
+        assert_eq!(
+            reasoning2, "Late think",
+            "content[] fallback: {reasoning2:?}"
+        );
+    }
+
     #[test]
     fn coalesce_pending_merges_split_entries() {
         let out = coalesce_pending(vec![

@@ -652,6 +652,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ctrl_o_falls_back_to_global_toggle_without_reasoning() {
+        // Previously Ctrl+O silently no-op'd when no message carried
+        // reasoning (e.g. nothing captured yet) — the reported dead key.
+        let mut app = test_app();
+        assert!(!app.thinking_expanded);
+        app.ctrl_o_expand();
+        assert!(app.thinking_expanded, "global live block expands");
+        assert!(
+            app.status.contains("no saved reasoning"),
+            "fallback explained: {}",
+            app.status
+        );
+        app.ctrl_o_expand();
+        assert!(!app.thinking_expanded, "flips back");
+    }
+
+    #[test]
+    fn ctrl_o_prefers_recent_reasoning_with_feedback() {
+        let mut app = test_app();
+        let mut m = Msg::new("assistant", "hello");
+        m.reasoning = Some("private chain".into());
+        app.messages.push(m);
+        app.ctrl_o_expand();
+        assert!(
+            app.expanded_reasoning.contains(&0),
+            "per-message block wins over the global toggle"
+        );
+        assert!(
+            !app.thinking_expanded,
+            "global untouched when a block toggled"
+        );
+        assert!(!app.status.is_empty(), "visible feedback");
+    }
+
+    #[test]
+    fn reasoning_delta_accumulates_while_hidden() {
+        // Display off must not lose thinking: the finished message and
+        // the loop's DB persist both keep it; render stays gated.
+        let mut app = test_app();
+        app.show_thinking = false;
+        App::accumulate_reasoning_delta(
+            &mut app.thinking_buf,
+            &mut app.status,
+            app.show_thinking,
+            "abc",
+        );
+        App::accumulate_reasoning_delta(
+            &mut app.thinking_buf,
+            &mut app.status,
+            app.show_thinking,
+            "def",
+        );
+        assert_eq!(app.thinking_buf, "abcdef", "kept while hidden");
+        assert!(
+            !app.status.contains("thinking…"),
+            "no status spam while hidden: {}",
+            app.status
+        );
+        app.show_thinking = true;
+        App::accumulate_reasoning_delta(
+            &mut app.thinking_buf,
+            &mut app.status,
+            app.show_thinking,
+            "!",
+        );
+        assert_eq!(app.thinking_buf, "abcdef!");
+        assert!(
+            app.status.contains("thinking…"),
+            "live counter when shown: {}",
+            app.status
+        );
+    }
+
     fn shift(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::SHIFT)
     }

@@ -1074,12 +1074,44 @@ impl App {
         Self::save_tui_state(serde_json::json!({"tool_display": obj}));
     }
 
+    /// Accumulate one reasoning delta for the running turn. Always
+    /// stored — display is gated at render — so the finished assistant
+    /// message keeps its thinking even when the dial was off mid-turn
+    /// (matches the loop's unconditional DB persist). Field-disjoint
+    /// on purpose: the stream poll holds `stream_rx` while calling it.
+    pub(crate) fn accumulate_reasoning_delta(
+        thinking_buf: &mut String,
+        status: &mut String,
+        show_thinking: bool,
+        r: &str,
+    ) {
+        thinking_buf.push_str(r);
+        if show_thinking {
+            *status = format!("thinking… {} chars", thinking_buf.len());
+        }
+    }
+
+    /// Ctrl+O: expand the latest reasoning block. Falls back to the
+    /// global live-thinking toggle when no message carries reasoning
+    /// yet, so the key always does something visible instead of
+    /// silently no-op'ing.
+    pub(crate) fn ctrl_o_expand(&mut self) {
+        if self.toggle_recent_reasoning() {
+            self.status = "reasoning block flipped — Ctrl+O again to flip back".into();
+        } else {
+            self.thinking_expanded = !self.thinking_expanded;
+            self.status = if self.thinking_expanded {
+                "no saved reasoning yet — live thinking expanded".into()
+            } else {
+                "thinking collapsed".into()
+            };
+        }
+    }
+
     fn toggle_recent_reasoning(&mut self) -> bool {
-        if let Some(idx) = self
-            .messages
-            .iter()
-            .rposition(|m| m.role == "assistant" && m.reasoning.is_some())
-        {
+        if let Some(idx) = self.messages.iter().rposition(|m| {
+            m.role == "assistant" && m.reasoning.as_ref().is_some_and(|r| !r.trim().is_empty())
+        }) {
             if self.expanded_reasoning.contains(&idx) {
                 self.expanded_reasoning.remove(&idx);
             } else {
@@ -1632,12 +1664,12 @@ impl App {
                             self.streaming_buf.push_str(&t);
                         }
                         vioraharness_core::provider::ProviderEvent::ReasoningDelta(r) => {
-                            if self.show_thinking {
-                                self.thinking_buf.push_str(&r);
-
-                                self.status =
-                                    format!("thinking… {} chars", self.thinking_buf.len());
-                            }
+                            Self::accumulate_reasoning_delta(
+                                &mut self.thinking_buf,
+                                &mut self.status,
+                                self.show_thinking,
+                                &r,
+                            );
                         }
                         vioraharness_core::provider::ProviderEvent::ToolCallDelta {
                             id,
@@ -1954,7 +1986,7 @@ impl App {
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                             && self.popup == Popup::None
                         {
-                            self.toggle_recent_reasoning();
+                            self.ctrl_o_expand();
                             continue;
                         }
 

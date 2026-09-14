@@ -121,23 +121,30 @@ impl OpenCodeProvider {
                                 for choice in choices {
                                     let delta = choice.get("delta");
                                     if let Some(delta) = delta {
-                                        if let Some(reasoning) = delta
-                                            .get("reasoning")
-                                            .and_then(|r| r.as_str())
-                                            .or_else(|| {
-                                                delta.get("reasoning_details").and_then(|r| {
-                                                    r.as_array().and_then(|a| {
-                                                        a.first().and_then(|o| {
-                                                            o.get("text").and_then(|t| t.as_str())
-                                                        })
-                                                    })
-                                                })
-                                            })
+                                        let mut reasoning = String::new();
+                                        for key in ["reasoning", "reasoning_content"] {
+                                            if let Some(r) = delta.get(key).and_then(|r| r.as_str())
+                                            {
+                                                reasoning.push_str(r);
+                                            }
+                                        }
+                                        // reasoning_details can split thinking across
+                                        // entries — concat all of them, not just first.
+                                        if let Some(arr) = delta
+                                            .get("reasoning_details")
+                                            .and_then(|r| r.as_array())
                                         {
+                                            for o in arr {
+                                                if let Some(t) =
+                                                    o.get("text").and_then(|t| t.as_str())
+                                                {
+                                                    reasoning.push_str(t);
+                                                }
+                                            }
+                                        }
+                                        if !reasoning.is_empty() {
                                             let _ = tx
-                                                .send(ProviderEvent::ReasoningDelta(
-                                                    reasoning.to_string(),
-                                                ))
+                                                .send(ProviderEvent::ReasoningDelta(reasoning))
                                                 .await;
                                         }
                                         if let Some(content) =

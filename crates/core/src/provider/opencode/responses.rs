@@ -122,7 +122,9 @@ impl OpenCodeProvider {
                     };
 
                     match event {
-                        "response.reasoning_summary_text.delta" => {
+                        "response.reasoning_summary_text.delta"
+                        | "response.reasoning_text.delta"
+                        | "response.reasoning_summary.delta" => {
                             if let Some(delta) = v.get("delta").and_then(|d| d.as_str()) {
                                 if !delta.is_empty() {
                                     saw_reasoning = true;
@@ -366,8 +368,44 @@ impl OpenCodeProvider {
                                                 let is_text = part
                                                     .get("type")
                                                     .and_then(|t| t.as_str())
-                                                    .map(|t| t == "summary_text" || t == "text")
+                                                    .map(|t| {
+                                                        t == "summary_text"
+                                                            || t == "reasoning_text"
+                                                            || t == "text"
+                                                    })
                                                     .unwrap_or(true);
+                                                if is_text {
+                                                    if let Some(text) =
+                                                        part.get("text").and_then(|t| t.as_str())
+                                                    {
+                                                        if !text.is_empty() {
+                                                            let _ = tx
+                                                                .send(
+                                                                    ProviderEvent::ReasoningDelta(
+                                                                        text.to_string(),
+                                                                    ),
+                                                                )
+                                                                .await;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Some gateways carry full reasoning text under
+                                        // `content` instead of `summary`.
+                                        if let Some(content) =
+                                            item.get("content").and_then(|c| c.as_array())
+                                        {
+                                            for part in content {
+                                                let is_text = part
+                                                    .get("type")
+                                                    .and_then(|t| t.as_str())
+                                                    .map(|t| {
+                                                        t == "reasoning_text"
+                                                            || t == "summary_text"
+                                                            || t == "text"
+                                                    })
+                                                    .unwrap_or(false);
                                                 if is_text {
                                                     if let Some(text) =
                                                         part.get("text").and_then(|t| t.as_str())
