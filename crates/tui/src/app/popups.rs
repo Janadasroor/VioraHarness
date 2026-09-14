@@ -27,6 +27,36 @@ impl App {
                 KeyCode::Esc => self.popup = Popup::None,
                 _ => {}
             },
+            Popup::ModePicker => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let len = vioraharness_core::mode::builtin_modes().len();
+                    if self.mode_cursor > 0 {
+                        self.mode_cursor -= 1;
+                    } else if len > 0 {
+                        self.mode_cursor = len - 1;
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let len = vioraharness_core::mode::builtin_modes().len();
+                    if len > 0 && self.mode_cursor + 1 < len {
+                        self.mode_cursor += 1;
+                    } else {
+                        self.mode_cursor = 0;
+                    }
+                }
+                KeyCode::Enter => {
+                    let modes = vioraharness_core::mode::builtin_modes();
+                    if let Some(m) = modes.get(self.mode_cursor) {
+                        let name = m.name.to_string();
+                        self.popup = Popup::None;
+                        self.apply_agent_mode(&name);
+                    } else {
+                        self.popup = Popup::None;
+                    }
+                }
+                KeyCode::Esc => self.popup = Popup::None,
+                _ => {}
+            },
             Popup::ModelPicker => match key.code {
                 KeyCode::Up => {
                     let filtered_len = self.model_filtered_len();

@@ -97,6 +97,7 @@ pub struct App {
     /// Distinct from `mode` (plan/build input toggle). Persisted as
     /// `last_mode` in tui_state.json; per-session value wins on /resume.
     pub(crate) agent_mode: String,
+    pub(crate) mode_cursor: usize,
 
     pub(crate) last_diff: Option<String>,
 
@@ -908,6 +909,30 @@ impl App {
         let _ = std::fs::write(p, serde_json::to_string_pretty(&cur).unwrap_or_default());
     }
 
+    /// Mode stored on the last-opened chat (`last_session`, written on TUI
+    /// exit in main.rs). A restart lands back in that chat's own mode
+    /// instead of the global default. Best-effort: None on any failure.
+    fn last_opened_chat_mode() -> Option<String> {
+        let last_path = std::env::var("XDG_DATA_HOME")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| {
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                std::path::PathBuf::from(home).join(".local/share")
+            })
+            .join("vioraharness/last_session");
+        let sid = std::fs::read_to_string(&last_path).ok()?;
+        let sid = sid.trim();
+        if sid.is_empty() {
+            return None;
+        }
+        let db = std::env::var("VIORAHARNESS_DB")
+            .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+        let store = vioraharness_core::session::SessionStore::new(&db).ok()?;
+        let sess = store.get_session(sid).ok()??;
+        sess.mode
+            .filter(|m| vioraharness_core::mode::is_known_mode(m))
+    }
+
     fn tool_verbosity(&self, name: &str) -> ToolVerbosity {
         Self::verbosity_for(&self.tool_display, &self.tool_display_default, name)
     }
@@ -1286,13 +1311,20 @@ impl App {
 
         let initial_models = Self::fetch_models_from_openrouter();
 
-        // Agent mode: saved TUI choice wins (validated), else the standard
-        // chain (env > project config > eda).
-        let agent_mode = state
-            .get("last_mode")
-            .and_then(|v| v.as_str())
-            .map(|m| m.to_string())
+        // Agent mode: explicit --mode/env wins, then the last-opened
+        // chat's own stored mode (per-chat memory), then the saved TUI
+        // default, then the standard chain (project config > eda).
+        let agent_mode = std::env::var(vioraharness_core::mode::MODE_ENV_VAR)
+            .ok()
             .filter(|m| vioraharness_core::mode::is_known_mode(m))
+            .or_else(Self::last_opened_chat_mode)
+            .or_else(|| {
+                state
+                    .get("last_mode")
+                    .and_then(|v| v.as_str())
+                    .map(|m| m.to_string())
+                    .filter(|m| vioraharness_core::mode::is_known_mode(m))
+            })
             .unwrap_or_else(|| vioraharness_core::mode::resolve_mode(None));
 
         let (perm_tx, perm_rx) = tokio::sync::mpsc::channel(8);
@@ -1363,6 +1395,7 @@ impl App {
             model_context: std::collections::HashMap::new(),
             mode: "build".into(),
             agent_mode,
+            mode_cursor: 0,
             last_diff: None,
             pending_perm: None,
             perm_cursor: 0,

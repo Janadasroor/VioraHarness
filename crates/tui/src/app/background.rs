@@ -1030,16 +1030,99 @@ mod tests {
             "rejection explained"
         );
         app.handle_slash("/mode");
+        assert_eq!(
+            app.popup,
+            crate::app::Popup::ModePicker,
+            "bare /mode opens picker dialog"
+        );
+        // Picker starts on the current mode; Enter keeps it (idempotent).
+        app.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.popup, crate::app::Popup::None, "picker closes on Enter");
         assert!(
             app.messages
                 .iter()
-                .any(|m| m.content.contains("usage: /mode")),
-            "bare /mode lists modes"
+                .any(|m| m.content.contains("already in web")),
+            "picker Enter on current mode is idempotent"
         );
         assert!(
             App::is_busy_safe_slash("/mode web"),
             "/mode runs while busy"
         );
+    }
+
+    #[test]
+    fn mode_picker_navigates_and_switches() {
+        let mut app = test_app();
+        app.agent_mode = "eda".to_string();
+        app.handle_slash("/mode");
+        assert_eq!(app.popup, Popup::ModePicker, "bare /mode opens picker");
+        assert_eq!(app.mode_cursor, 0, "cursor starts on current mode");
+        app.handle_popup_key(KeyEvent::new(KeyCode::Down, KeyModifiers::empty()));
+        assert_eq!(app.mode_cursor, 1, "Down moves to web");
+        app.handle_popup_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()));
+        assert_eq!(app.popup, Popup::None, "picker closes after switch");
+        assert_eq!(app.agent_mode, "web", "picker Enter switches mode");
+        // Esc closes without switching.
+        app.handle_slash("/mode");
+        assert_eq!(app.popup, Popup::ModePicker);
+        app.handle_popup_key(KeyEvent::new(KeyCode::Esc, KeyModifiers::empty()));
+        assert_eq!(app.popup, Popup::None);
+        assert_eq!(app.agent_mode, "web", "Esc keeps current mode");
+    }
+
+    #[test]
+    fn mode_switch_persists_to_session_row() {
+        use vioraharness_core::session::SessionStore;
+        let (db, prev, _env_guard) = with_temp_db("mode-persist");
+        let mut app = test_app();
+        app.agent_mode = "eda".to_string();
+        SessionStore::new(db.to_str().unwrap())
+            .unwrap()
+            .create_session(&app.session_id, "m", None)
+            .unwrap();
+        app.handle_slash("/mode web");
+        assert_eq!(app.agent_mode, "web");
+        let stored = SessionStore::new(db.to_str().unwrap())
+            .unwrap()
+            .get_session(&app.session_id)
+            .unwrap()
+            .expect("session row");
+        assert_eq!(
+            stored.mode.as_deref(),
+            Some("web"),
+            "per-chat mode written on switch, not on next turn"
+        );
+        restore_db_env(prev, &db);
+    }
+
+    #[test]
+    fn startup_prefers_last_opened_chat_mode() {
+        use vioraharness_core::session::SessionStore;
+        let (db, prev_db, _env_guard) = with_temp_db("mode-startup");
+        let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
+        let xdg = std::env::temp_dir().join(format!("vh_xdg_mode_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(xdg.join("vioraharness"));
+        std::env::set_var("XDG_DATA_HOME", &xdg);
+        SessionStore::new(db.to_str().unwrap())
+            .unwrap()
+            .create_session("chat-web-1", "m", None)
+            .unwrap();
+        SessionStore::new(db.to_str().unwrap())
+            .unwrap()
+            .set_session_mode("chat-web-1", "web")
+            .unwrap();
+        std::fs::write(xdg.join("vioraharness/last_session"), "chat-web-1").unwrap();
+        assert_eq!(
+            App::last_opened_chat_mode().as_deref(),
+            Some("web"),
+            "last opened chat's mode wins over the global default"
+        );
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&xdg);
+        restore_db_env(prev_db, &db);
     }
 
     fn rewind_test_session(

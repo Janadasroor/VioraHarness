@@ -100,6 +100,7 @@ pub(crate) enum Popup {
     Help,
     Sessions,
     ModelPicker,
+    ModePicker,
     Permissions,
     ThemePicker,
     Providers,

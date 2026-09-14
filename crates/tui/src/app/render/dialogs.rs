@@ -17,6 +17,7 @@ impl App {
                 Popup::Help => " Help — VioraHarness TUI ",
                 Popup::Sessions => " Sessions (SQLite) ",
                 Popup::ModelPicker => " Model Picker ",
+                Popup::ModePicker => " Mode Picker ",
                 Popup::Permissions => " Permissions ",
                 Popup::ThemePicker => " Theme Picker ",
                 Popup::Providers => " Providers — API Keys ",
@@ -64,6 +65,7 @@ impl App {
                 Line::from("  /new /fork /rename /archive /delete /export  chats"),
                 Line::from("  /providers manage API keys (F2)"),
                 Line::from("  /model <name>  switch model (e.g. provider/model-id from /model picker)"),
+                Line::from("  /mode [name]   switch agent mode — picker when bare (eda|web|android)"),
                 Line::from("  /theme [name]  switch theme (tokyonight[-soft]/eye-comfort/warm-dark/catppuccin/dracula/gruvbox/nord/system)"),
                 Line::from("  /thinking on/off  toggle thinking block (or Ctrl+O)"),
                 Line::from("  /undo      undo last file snapshot"),
@@ -324,6 +326,51 @@ impl App {
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(" Type to search • ↑/↓ • PgUp/PgDn page • Enter select • Esc clear/close • Backspace delete", Style::default().fg(Color::DarkGray))));
+                lines
+            }
+            Popup::ModePicker => {
+                let modes = vioraharness_core::mode::builtin_modes();
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    format!(" Mode — {} (current)", self.agent_mode),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                for (i, m) in modes.iter().enumerate() {
+                    let is_selected = i == self.mode_cursor;
+                    let accent = crate::theme::hex_to_color(m.accent);
+                    let name_style = if is_selected {
+                        Theme::selection().fg(accent).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(accent).add_modifier(Modifier::BOLD)
+                    };
+                    let star = if is_selected { "▶ " } else { "  " };
+                    let cur = if m.name == self.agent_mode {
+                        "● "
+                    } else {
+                        "○ "
+                    };
+                    let tools = vioraharness_core::mode::registry_for_mode(m.name).all().len();
+                    lines.push(Line::from(vec![
+                        Span::raw(star),
+                        Span::styled(cur, Style::default().fg(accent)),
+                        Span::styled(format!("{:<8}", m.name), name_style),
+                        Span::styled(
+                            format!("{tools:>3} tools "),
+                            Style::default().fg(Color::Cyan),
+                        ),
+                        Span::styled(m.accent, Style::default().fg(accent)),
+                    ]));
+                    lines.push(Line::from(Span::styled(
+                        format!("      {}", m.description),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " ↑/↓ or j/k select • Enter switch • Esc close • /mode <name> also works ",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
                 lines
             }
             Popup::Providers => {

@@ -2,6 +2,70 @@ use super::popups::rewind_checkpoints;
 use super::*;
 
 impl App {
+    pub(crate) fn apply_agent_mode(&mut self, raw: &str) {
+        use vioraharness_core::mode as agent_modes;
+        let name = agent_modes::normalize_mode_name(raw);
+        if !agent_modes::is_known_mode(&name) {
+            let known: Vec<&str> = agent_modes::builtin_modes()
+                .iter()
+                .map(|m| m.name)
+                .collect();
+            self.messages.push(Msg::new(
+                "system",
+                format!("unknown mode: {} (known: {})", raw, known.join(", ")),
+            ));
+            return;
+        }
+        if name == self.agent_mode {
+            self.messages
+                .push(Msg::new("system", format!("already in {name} mode")));
+            return;
+        }
+        self.agent_mode = name.clone();
+        Self::save_tui_state(serde_json::json!({"last_mode": self.agent_mode}));
+        // Per-chat memory, written now (not on the next
+        // turn): reopening this chat restores its mode even
+        // if no turn runs in between. Best-effort — the
+        // turn persists it again anyway.
+        {
+            let db = std::env::var("VIORAHARNESS_DB")
+                .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+            if let Ok(store) = vioraharness_core::session::SessionStore::new(&db) {
+                let _ = store.set_session_mode(&self.session_id, &name);
+            }
+        }
+        // Foreign running tasks keep their origin mode and
+        // keep running — surface them instead of orphaning.
+        let foreign: Vec<String> = vioraharness_core::tools::tasks::list_tasks()
+            .into_iter()
+            .filter(|t| {
+                t.status == vioraharness_core::tools::tasks::BgStatus::Running
+                    && t.mode != self.agent_mode
+            })
+            .map(|t| format!("{} ({})", short_task_id(&t.id), t.mode))
+            .collect();
+        let tool_count = agent_modes::registry_for_mode(&name).all().len();
+        let mut msg =
+            format!("mode → {name} ({tool_count} tools, saved). New turns use it; history stays.");
+        if !foreign.is_empty() {
+            msg.push_str(&format!(
+                " Still running from other modes: {} — /tasks to inspect/kill.",
+                foreign.join(", ")
+            ));
+        }
+        self.messages.push(Msg::new("system", msg));
+    }
+
+    pub(crate) fn open_mode_picker(&mut self) {
+        use vioraharness_core::mode as agent_modes;
+        let modes = agent_modes::builtin_modes();
+        self.mode_cursor = modes
+            .iter()
+            .position(|m| m.name == self.agent_mode)
+            .unwrap_or(0);
+        self.popup = Popup::ModePicker;
+    }
+
     pub(crate) fn handle_slash(&mut self, cmd: &str) {
         let parts: Vec<&str> = cmd.split_whitespace().collect();
         match parts.first().copied().unwrap_or("") {
@@ -55,57 +119,10 @@ impl App {
                 self.popup = Popup::Skills;
             }
             "/mode" | "/modes" => {
-                use vioraharness_core::mode as agent_modes;
                 if parts.len() > 1 {
-                    let name = agent_modes::normalize_mode_name(parts[1]);
-                    if !agent_modes::is_known_mode(&name) {
-                        let known: Vec<&str> = agent_modes::builtin_modes()
-                            .iter()
-                            .map(|m| m.name)
-                            .collect();
-                        self.messages.push(Msg::new(
-                            "system",
-                            format!("unknown mode: {} (known: {})", parts[1], known.join(", ")),
-                        ));
-                    } else if name == self.agent_mode {
-                        self.messages
-                            .push(Msg::new("system", format!("already in {name} mode")));
-                    } else {
-                        self.agent_mode = name.clone();
-                        Self::save_tui_state(serde_json::json!({"last_mode": self.agent_mode}));
-                        // Foreign running tasks keep their origin mode and
-                        // keep running — surface them instead of orphaning.
-                        let foreign: Vec<String> = vioraharness_core::tools::tasks::list_tasks()
-                            .into_iter()
-                            .filter(|t| {
-                                t.status == vioraharness_core::tools::tasks::BgStatus::Running
-                                    && t.mode != self.agent_mode
-                            })
-                            .map(|t| format!("{} ({})", short_task_id(&t.id), t.mode))
-                            .collect();
-                        let tool_count = agent_modes::registry_for_mode(&name).all().len();
-                        let mut msg = format!(
-                            "mode → {name} ({tool_count} tools, saved). New turns use it; history stays."
-                        );
-                        if !foreign.is_empty() {
-                            msg.push_str(&format!(
-                                " Still running from other modes: {} — /tasks to inspect/kill.",
-                                foreign.join(", ")
-                            ));
-                        }
-                        self.messages.push(Msg::new("system", msg));
-                    }
+                    self.apply_agent_mode(parts[1]);
                 } else {
-                    let mut lines = vec![format!("mode: {} (current)", self.agent_mode)];
-                    for m in agent_modes::builtin_modes() {
-                        let tools = agent_modes::registry_for_mode(m.name).all().len();
-                        lines.push(format!(
-                            "  {:<8} {tools:>3} tools {} — {}",
-                            m.name, m.accent, m.description
-                        ));
-                    }
-                    lines.push("usage: /mode <name>".to_string());
-                    self.messages.push(Msg::new("system", lines.join("\n")));
+                    self.open_mode_picker();
                 }
             }
             "/skill-new" | "/new-skill" | "/skill-create" => {
