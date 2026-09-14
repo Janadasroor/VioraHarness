@@ -53,6 +53,127 @@ async fn after_write_hook(path: &str) -> Option<Value> {
     None
 }
 
+/// Collect a `string | string[]` arg into a Vec (single string, array, or absent).
+fn str_list(args: &Value, key: &str) -> Vec<String> {
+    match args.get(key) {
+        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn push_repeatable(vargs: &mut Vec<String>, flag: &str, values: Vec<String>) {
+    for v in values {
+        vargs.push(flag.into());
+        vargs.push(v);
+    }
+}
+
+fn push_flag(vargs: &mut Vec<String>, args: &Value, key: &str, flag: &str) {
+    if args.get(key).and_then(|v| v.as_bool()).unwrap_or(false) {
+        vargs.push(flag.into());
+    }
+}
+
+fn push_opt_str(vargs: &mut Vec<String>, args: &Value, key: &str, flag: &str) {
+    if let Some(s) = args.get(key).and_then(|v| v.as_str()) {
+        if !s.is_empty() {
+            vargs.push(flag.into());
+            vargs.push(s.into());
+        }
+    }
+}
+
+/// Build `viora netlist-run` argv from tool args (pure, unit-testable).
+pub fn build_netlist_run_args(args: &Value) -> Vec<String> {
+    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+    let mut vargs = vec![
+        "netlist-run".to_string(),
+        file.to_string(),
+        "--json".to_string(),
+    ];
+    push_opt_str(&mut vargs, args, "analysis", "--analysis");
+    push_opt_str(&mut vargs, args, "step", "--step");
+    push_opt_str(&mut vargs, args, "stop", "--stop");
+    push_opt_str(&mut vargs, args, "timeout", "--timeout");
+    push_opt_str(&mut vargs, args, "range", "--range");
+    push_opt_str(&mut vargs, args, "measure_format", "--measure-format");
+    push_opt_str(&mut vargs, args, "base_signal", "--base-signal");
+    if let Some(s) = args.get("export_raw").and_then(|v| v.as_str()) {
+        if !s.is_empty() {
+            vargs.push("--export-raw".into());
+            vargs.push(normalize_export_raw_format(s).into());
+        }
+    }
+    push_flag(&mut vargs, args, "compat", "--compat");
+    push_flag(&mut vargs, args, "robust", "--robust");
+    push_flag(&mut vargs, args, "stats", "--stats");
+    push_repeatable(&mut vargs, "--measure", str_list(args, "measure"));
+    push_repeatable(&mut vargs, "--assert", str_list(args, "assert"));
+    push_repeatable(&mut vargs, "--signal", str_list(args, "signal"));
+    if let Some(n) = args.get("max_points").and_then(|v| v.as_u64()) {
+        vargs.push("--max-points".into());
+        vargs.push(n.to_string());
+    }
+    vargs
+}
+
+/// Normalize `export_raw`: accepts a format (`csv|json|parquet`) or a legacy
+/// output path (`/tmp/x.raw`, `/tmp/x.json`, ...). Paths infer their format
+/// from the extension (`.csv`→csv, `.parquet`→parquet, else json).
+pub fn normalize_export_raw_format(s: &str) -> &str {
+    match s.trim().to_lowercase().as_str() {
+        "csv" => "csv",
+        "parquet" => "parquet",
+        "json" => "json",
+        _ => {
+            let lower = s.to_lowercase();
+            if lower.ends_with(".csv") {
+                "csv"
+            } else if lower.ends_with(".parquet") || lower.ends_with(".pq") {
+                "parquet"
+            } else {
+                "json"
+            }
+        }
+    }
+}
+
+/// True when `export_raw` is a legacy output path rather than a bare format.
+pub fn export_raw_is_path(s: &str) -> bool {
+    !matches!(s.trim().to_lowercase().as_str(), "csv" | "json" | "parquet")
+        && (s.contains('/') || s.contains('.'))
+}
+
+/// Build `viora pcb-compose` argv from tool args (pure, unit-testable).
+pub fn build_pcb_compose_args(args: &Value) -> Vec<String> {
+    let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+    let mut vargs = vec!["pcb-compose".to_string(), file.to_string()];
+    for (key, flag) in [
+        ("add_component", "--add-component"),
+        ("add_trace", "--add-trace"),
+        ("add_via", "--add-via"),
+        ("delete_item", "--delete-item"),
+        ("shrink_outline", "--shrink-outline"),
+        ("add_netclass", "--add-netclass"),
+        ("assign_net", "--assign-net"),
+        ("add_pour", "--add-pour"),
+        ("route_layers", "--route-layers"),
+        ("out", "--out"),
+    ] {
+        push_opt_str(&mut vargs, args, key, flag);
+    }
+    push_flag(&mut vargs, args, "auto_route", "--auto-route");
+    push_flag(&mut vargs, args, "allow_diagonals", "--allow-diagonals");
+    vargs.push("--json".into());
+    vargs
+}
+
 pub async fn execute_tool(name: &str, args: Value) -> Value {
     if let Some(err) = validate_against_schema(name, &args) {
         return err;
@@ -139,17 +260,21 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
             } else {
                 file.to_string()
             };
-            let out = viora::run_viora_command(
-                &[
-                    "schematic-render".into(),
-                    render_file.clone(),
-                    out_path.into(),
-                    "--scale".into(),
-                    scale.to_string(),
-                ],
-                Some(60),
-            )
-            .await;
+            let mut render_args = vec![
+                "schematic-render".into(),
+                render_file.clone(),
+                out_path.into(),
+                "--scale".into(),
+                scale.to_string(),
+            ];
+            if args
+                .get("transparent")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                render_args.push("--transparent".into());
+            }
+            let out = viora::run_viora_command(&render_args, Some(60)).await;
 
             let mut res = json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "out": out_path, "render_file": render_file});
             if out.ok {
@@ -184,40 +309,41 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
             res
         }
         "netlist_run" => {
-            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
-            let mut vargs = vec![
-                "netlist-run".to_string(),
-                file.to_string(),
-                "--json".to_string(),
-            ];
-            if let Some(a) = args.get("analysis").and_then(|v| v.as_str()) {
-                vargs.extend(["--analysis".into(), a.into()]);
-            }
-            if let Some(s) = args.get("step").and_then(|v| v.as_str()) {
-                vargs.extend(["--step".into(), s.into()]);
-            }
-            if let Some(s) = args.get("stop").and_then(|v| v.as_str()) {
-                vargs.extend(["--stop".into(), s.into()]);
-            }
-
-            if let Some(v) = args.get("measure").and_then(|v| v.as_bool()) {
-                if v {
-                    vargs.push("--measure".into());
-                }
-            }
-            if let Some(v) = args.get("assert").and_then(|v| v.as_bool()) {
-                if v {
-                    vargs.push("--assert".into());
-                }
-            }
-            if let Some(s) = args.get("export_raw").and_then(|v| v.as_str()) {
-                vargs.extend(["--export-raw".into(), s.into()]);
-            }
-            if let Some(s) = args.get("range").and_then(|v| v.as_str()) {
-                vargs.extend(["--range".into(), s.into()]);
-            }
+            let vargs = build_netlist_run_args(&args);
             let out = viora::run_viora_command(&vargs, Some(120)).await;
-            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+            let mut res = json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data, "argv": vargs});
+            // Back-compat: `export_raw` historically accepted an output path
+            // (`/tmp/x.raw`). viora's `--export-raw` takes a format, so copy
+            // the reported rawPath to the requested path on success.
+            if out.ok {
+                if let Some(dest) = args.get("export_raw").and_then(|v| v.as_str()) {
+                    if export_raw_is_path(dest) {
+                        let src = out
+                            .data
+                            .as_ref()
+                            .and_then(|d| d.get("rawPath"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string());
+                        if let Some(src) = src {
+                            if src != dest {
+                                match std::fs::copy(&src, dest) {
+                                    Ok(_) => {
+                                        res["rawPath"] = json!(dest);
+                                    }
+                                    Err(e) => {
+                                        res["copy_warning"] = json!(format!(
+                                            "sim ok but failed to copy {src} -> {dest}: {e}"
+                                        ));
+                                    }
+                                }
+                            } else {
+                                res["rawPath"] = json!(dest);
+                            }
+                        }
+                    }
+                }
+            }
+            res
         }
         "netlist_validate" => {
             let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
@@ -288,19 +414,24 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
                 .get("format")
                 .and_then(|v| v.as_str())
                 .unwrap_or("json");
-            let out = viora::run_viora_command(
-                &[
-                    "raw-export".into(),
-                    file.into(),
-                    "--format".into(),
-                    format.into(),
-                    "--json".into(),
-                    "--out".into(),
-                    out_path.into(),
-                ],
-                Some(60),
-            )
-            .await;
+            let mut vargs = vec![
+                "raw-export".into(),
+                file.into(),
+                "--format".into(),
+                format.into(),
+                "--json".into(),
+                "--out".into(),
+                out_path.into(),
+            ];
+            push_repeatable(&mut vargs, "--signal", str_list(&args, "signal"));
+            push_opt_str(&mut vargs, &args, "signal_regex", "--signal-regex");
+            push_opt_str(&mut vargs, &args, "range", "--range");
+            push_opt_str(&mut vargs, &args, "base_signal", "--base-signal");
+            if let Some(n) = args.get("max_points").and_then(|v| v.as_u64()) {
+                vargs.push("--max-points".into());
+                vargs.push(n.to_string());
+            }
+            let out = viora::run_viora_command(&vargs, Some(60)).await;
 
             let mut res = json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data, "out": out_path});
             if out.ok {
@@ -322,34 +453,10 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
             if file.is_empty() {
                 return json!({"ok": false, "error": "missing file"});
             }
-            let mut vargs = vec!["pcb-compose".into(), file.into()];
-            if let Some(s) = args.get("add_component").and_then(|v| v.as_str()) {
-                vargs.extend(["--add-component".into(), s.into()]);
-            }
-            if let Some(s) = args.get("add_trace").and_then(|v| v.as_str()) {
-                vargs.extend(["--add-trace".into(), s.into()]);
-            }
-            if let Some(s) = args.get("add_via").and_then(|v| v.as_str()) {
-                vargs.extend(["--add-via".into(), s.into()]);
-            }
-            if args
-                .get("auto_route")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false)
-            {
-                vargs.push("--auto-route".into());
-            }
-            if let Some(s) = args.get("route_layers").and_then(|v| v.as_str()) {
-                vargs.extend(["--route-layers".into(), s.into()]);
-            }
-            if let Some(s) = args.get("out").and_then(|v| v.as_str()) {
-                vargs.extend(["--out".into(), s.into()]);
-            }
-            vargs.push("--json".into());
+            let vargs = build_pcb_compose_args(&args);
 
             let out = viora::run_viora_command(&vargs, Some(120)).await;
-            let mut res =
-                json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data});
+            let mut res = json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data, "argv": vargs});
             // After compose, optionally render for vision feedback (netlist-first workflow invariant)
             if out.ok {
                 res["hint"] =
@@ -412,10 +519,173 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
         "raw_stats" => {
             let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
             let mut vargs = vec!["raw-stats".into(), file.into(), "--json".into()];
-            if let Some(s) = args.get("signal").and_then(|v| v.as_str()) {
-                vargs.extend(["--signal".into(), s.into()]);
-            }
+            push_repeatable(&mut vargs, "--signal", str_list(&args, "signal"));
+            push_opt_str(&mut vargs, &args, "range", "--range");
             let out = viora::run_viora_command(&vargs, Some(30)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "schematic_netlist" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let mut vargs = vec!["schematic-netlist".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "format", "--format");
+            push_opt_str(&mut vargs, &args, "analysis", "--analysis");
+            push_opt_str(&mut vargs, &args, "step", "--step");
+            push_opt_str(&mut vargs, &args, "stop", "--stop");
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            // Accept both `format` and legacy `f` naming from callers.
+            if args.get("format").is_none() {
+                push_opt_str(&mut vargs, &args, "f", "--format");
+            }
+            let out = viora::run_viora_command(&vargs, Some(60)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "schematic_bom" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let mut vargs = vec!["schematic-bom".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            let out = viora::run_viora_command(&vargs, Some(30)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "netlist_compare" => {
+            let schematic = args.get("schematic").and_then(|v| v.as_str()).unwrap_or("");
+            let netlist = args.get("netlist").and_then(|v| v.as_str()).unwrap_or("");
+            if schematic.is_empty() || netlist.is_empty() {
+                return json!({"ok": false, "error": "netlist_compare needs schematic + netlist"});
+            }
+            let mut vargs = vec![
+                "netlist-compare".into(),
+                schematic.into(),
+                netlist.into(),
+                "--json".into(),
+            ];
+            push_opt_str(&mut vargs, &args, "analysis", "--analysis");
+            push_opt_str(&mut vargs, &args, "step", "--step");
+            push_opt_str(&mut vargs, &args, "stop", "--stop");
+            let out = viora::run_viora_command(&vargs, Some(60)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "autofix" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            if file.is_empty() {
+                return json!({"ok": false, "error": "missing file"});
+            }
+            let mut vargs = vec!["autofix".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            let out = viora::run_viora_command(&vargs, Some(120)).await;
+            let mut res =
+                json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data});
+            if out.ok {
+                res["hint"] =
+                    json!("re-run erc/drc + schematic_render/pcb_render to verify the fix");
+            }
+            res
+        }
+        "pcb_sync" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let schematic = args.get("schematic").and_then(|v| v.as_str()).unwrap_or("");
+            if file.is_empty() || schematic.is_empty() {
+                return json!({"ok": false, "error": "pcb_sync needs file + schematic"});
+            }
+            let mut vargs = vec![
+                "pcb-sync".into(),
+                file.into(),
+                "--schematic".into(),
+                schematic.into(),
+                "--json".into(),
+            ];
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            let out = viora::run_viora_command(&vargs, Some(60)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "pcb_export" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            if file.is_empty() {
+                return json!({"ok": false, "error": "missing file"});
+            }
+            let mut vargs = vec!["pcb-export".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "format", "--format");
+            if args.get("format").is_none() {
+                push_opt_str(&mut vargs, &args, "f", "--format");
+            }
+            if args
+                .get("output")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .is_some()
+            {
+                push_opt_str(&mut vargs, &args, "output", "--output");
+            } else {
+                push_opt_str(&mut vargs, &args, "out", "--output");
+            }
+            let out = viora::run_viora_command(&vargs, Some(120)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "pcb_autoroute" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            if file.is_empty() {
+                return json!({"ok": false, "error": "missing file"});
+            }
+            let mut vargs = vec!["pcb-autoroute".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            push_flag(&mut vargs, &args, "ripup", "--ripup");
+            if let Some(g) = args.get("grid").and_then(|v| v.as_f64()) {
+                vargs.push("--grid".into());
+                vargs.push(g.to_string());
+            } else if let Some(g) = args.get("grid").and_then(|v| v.as_str()) {
+                if !g.is_empty() {
+                    vargs.push("--grid".into());
+                    vargs.push(g.into());
+                }
+            }
+            let out = viora::run_viora_command(&vargs, Some(180)).await;
+            let mut res =
+                json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data});
+            if out.ok {
+                res["hint"] = json!("run pcb_render for vision feedback and pcb_validate for DRC");
+            }
+            res
+        }
+        "pcb_cleanup" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            if file.is_empty() {
+                return json!({"ok": false, "error": "missing file"});
+            }
+            let mut vargs = vec!["pcb-cleanup".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            let out = viora::run_viora_command(&vargs, Some(60)).await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "pcb_netlist" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let out = viora::run_viora_command(
+                &["pcb-netlist".into(), file.into(), "--json".into()],
+                Some(30),
+            )
+            .await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "symbol_validate" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            let out = viora::run_viora_command(
+                &["symbol-validate".into(), file.into(), "--json".into()],
+                Some(30),
+            )
+            .await;
+            json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
+        }
+        "footprint_import" => {
+            let file = args.get("file").and_then(|v| v.as_str()).unwrap_or("");
+            if file.is_empty() {
+                return json!({"ok": false, "error": "missing file"});
+            }
+            let mut vargs = vec!["footprint-import".into(), file.into(), "--json".into()];
+            push_opt_str(&mut vargs, &args, "out", "--out");
+            push_flag(&mut vargs, &args, "render", "--render");
+            if let Some(n) = args.get("limit").and_then(|v| v.as_u64()) {
+                vargs.push("--limit".into());
+                vargs.push(n.to_string());
+            }
+            let out = viora::run_viora_command(&vargs, Some(60)).await;
             json!({"ok": out.ok, "stdout": out.stdout, "stderr": out.stderr, "data": out.data})
         }
         "symbol_list" => {
@@ -743,6 +1013,151 @@ mod tests {
                 .unwrap()
                 .contains("missing required field 'path'"),
             "{r}"
+        );
+    }
+
+    #[test]
+    fn netlist_run_arg_builder_covers_full_flags() {
+        let args = json!({
+            "file": "a.cir",
+            "analysis": "tran",
+            "step": "1u",
+            "stop": "1m",
+            "compat": true,
+            "robust": true,
+            "stats": true,
+            "measure": ["V(out)_avg > 0.5", "V(out)_rms < 6"],
+            "assert": "V(out)_avg > 0.5",
+            "measure_format": "json",
+            "range": "0:0.001",
+            "signal": "V(out)",
+            "max_points": 1000,
+            "base_signal": "V(out)",
+            "export_raw": "/tmp/a.json",
+            "timeout": "60s"
+        });
+        let v = build_netlist_run_args(&args);
+        for flag in [
+            "--analysis",
+            "--step",
+            "--stop",
+            "--compat",
+            "--robust",
+            "--stats",
+            "--measure",
+            "--assert",
+            "--measure-format",
+            "--range",
+            "--signal",
+            "--max-points",
+            "--base-signal",
+            "--export-raw",
+            "--timeout",
+        ] {
+            assert!(v.contains(&flag.to_string()), "missing {flag}: {v:?}");
+        }
+        assert_eq!(v.iter().filter(|s| s.as_str() == "--measure").count(), 2);
+        assert_eq!(v.iter().filter(|s| s.as_str() == "--signal").count(), 1);
+        // Legacy path normalizes to its inferred format.
+        let pos = v
+            .iter()
+            .position(|s| s == "--export-raw")
+            .expect("--export-raw");
+        assert_eq!(v[pos + 1], "json", "path /tmp/a.json infers json: {v:?}");
+        assert_eq!(normalize_export_raw_format("csv"), "csv");
+        assert_eq!(normalize_export_raw_format("/tmp/x.csv"), "csv");
+        assert_eq!(normalize_export_raw_format("/tmp/x.parquet"), "parquet");
+        assert!(export_raw_is_path("/tmp/a.json"));
+        assert!(!export_raw_is_path("json"));
+        // Back-compat: old boolean measure/assert must not emit bare flags.
+        let legacy = build_netlist_run_args(&json!({"file": "a.cir"}));
+        assert!(!legacy.contains(&"--measure".to_string()));
+        assert!(!legacy.contains(&"--assert".to_string()));
+    }
+
+    #[test]
+    fn pcb_compose_arg_builder_covers_all_injects() {
+        let args = json!({
+            "file": "b.pcb",
+            "add_component": "footprint=R_0603,x=10,y=10",
+            "add_trace": "x1=0,y1=0,x2=1,y2=1,width=0.2,layer=top,net=GND",
+            "add_via": "x=1,y=1,diameter=0.6,drill=0.3,net=GND",
+            "delete_item": "id=3",
+            "shrink_outline": "margin=1",
+            "add_netclass": "name=PWR,width=0.5,clearance=0.2",
+            "assign_net": "net=GND,class=PWR",
+            "add_pour": "layer=top,net=GND,clearance=0.3",
+            "auto_route": true,
+            "allow_diagonals": true,
+            "route_layers": "both",
+            "out": "/tmp/b.pcb"
+        });
+        let v = build_pcb_compose_args(&args);
+        for flag in [
+            "--add-component",
+            "--add-trace",
+            "--add-via",
+            "--delete-item",
+            "--shrink-outline",
+            "--add-netclass",
+            "--assign-net",
+            "--add-pour",
+            "--auto-route",
+            "--allow-diagonals",
+            "--route-layers",
+            "--out",
+            "--json",
+        ] {
+            assert!(v.contains(&flag.to_string()), "missing {flag}: {v:?}");
+        }
+    }
+
+    #[test]
+    fn str_list_accepts_string_array_and_absent() {
+        assert_eq!(str_list(&json!({"m": "a"}), "m"), vec!["a".to_string()]);
+        assert_eq!(
+            str_list(&json!({"m": ["a", "b"]}), "m"),
+            vec!["a".to_string(), "b".to_string()]
+        );
+        assert!(str_list(&json!({}), "m").is_empty());
+        assert!(str_list(&json!({"m": ""}), "m").is_empty());
+    }
+
+    #[tokio::test]
+    async fn eda_schemas_reject_missing_required() {
+        for (tool, args) in [
+            ("netlist_run", json!({})),
+            ("drc", json!({})),
+            ("pcb_sync", json!({"file": "a.pcb"})),
+            ("netlist_compare", json!({"schematic": "a.flxsch"})),
+            ("pcb_export", json!({})),
+            ("autofix", json!({})),
+            ("schematic_netlist", json!({})),
+            ("footprint_import", json!({})),
+        ] {
+            let r = execute_tool(tool, args).await;
+            assert_eq!(r["ok"], false, "{tool} should fail closed");
+            assert!(
+                r["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("missing required field"),
+                "{tool}: {r}"
+            );
+        }
+        // New schemas accept their happy-path shapes (dispatch may still fail
+        // without viora, but must not fail schema validation).
+        let r = execute_tool(
+            "netlist_run",
+            json!({"file": "a.cir", "measure": ["V(out)_avg > 1"], "compat": true}),
+        )
+        .await;
+        assert!(
+            !r.get("error")
+                .and_then(|e| e.as_str())
+                .unwrap_or("")
+                .contains("schema validation"),
+            "netlist_run happy shape rejected: {r}"
         );
     }
 

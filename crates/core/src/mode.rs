@@ -289,9 +289,18 @@ mod tests {
         for hidden in [
             "netlist_run",
             "schematic_render",
+            "schematic_netlist",
+            "schematic_bom",
+            "netlist_compare",
             "pcb_render",
             "pcb_compose",
+            "pcb_sync",
+            "pcb_export",
+            "pcb_autoroute",
+            "pcb_cleanup",
             "erc",
+            "drc",
+            "autofix",
             "flux",
             "viora",
         ] {
@@ -323,6 +332,10 @@ mod tests {
         for hidden in [
             "netlist_run",
             "pcb_compose",
+            "pcb_sync",
+            "pcb_export",
+            "schematic_netlist",
+            "autofix",
             "browser_screenshot",
             "dev_serve",
         ] {

@@ -65,32 +65,56 @@ impl ToolRegistry {
                 "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
             }),
         );
-        self.register("schematic_render", "Render .flxsch to PNG (returns base64)", json!({
-            "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"},"scale":{"type":"number"}},"required":["file"]
+        self.register("schematic_render", "Render .flxsch to PNG (returns base64 vision). Netlist-first: write .cir -> netlist-run -> raw_export -> netlist-to-schematic -> schematic-render. Re-render after every schematic mutation.", json!({
+            "type":"object","properties":{"file":{"type":"string","description":".flxsch (or .cir, auto-converted via netlist-to-schematic)"},"out":{"type":"string","description":"output PNG path (default /tmp/viora_render.png)"},"scale":{"type":"number","description":"render scale (default 4.0)"},"transparent":{"type":"boolean","description":"transparent PNG background"}},"required":["file"]
         }));
-        self.register("pcb_render", "Render .pcb to PNG (base64)", json!({
+        self.register("pcb_render", "Render .pcb to PNG (base64 vision). Re-render after every pcb-compose for visual feedback.", json!({
             "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"}},"required":["file"]
         }));
-        self.register("netlist_run", "Run SPICE sim: file + analysis/step/stop -> ok/measures/rawPath", json!({
-            "type":"object","properties":{"file":{"type":"string"},"analysis":{"type":"string"},"step":{"type":"string"},"stop":{"type":"string"}},"required":["file"]
+        self.register("netlist_run", "Run SPICE sim on .cir/.flxsch. Netlist-first entry point: prefer --measure/--assert/--export-raw json, then raw_export. Use --compat/--robust for convergence.", json!({
+            "type":"object","properties":{
+                "file":{"type":"string","description":".cir or .flxsch input"},
+                "analysis":{"type":"string","enum":["op","tran","ac"],"description":"analysis type"},
+                "step":{"type":"string","description":"transient step (e.g. 1u)"},
+                "stop":{"type":"string","description":"transient stop (e.g. 1m)"},
+                "compat":{"type":"boolean","description":"backward-compat transforms for .cir"},
+                "robust":{"type":"boolean","description":"robust solver options for convergence"},
+                "stats":{"type":"boolean","description":"statistical summary of signals"},
+                "measure":{"type":["string","array"],"description":"measurement expr(s), repeatable (e.g. V(out)_avg > 0.5)","items":{"type":"string"}},
+                "assert":{"type":["string","array"],"description":"pass/fail assertion expr(s), repeatable","items":{"type":"string"}},
+                "measure_format":{"type":"string","enum":["text","json"]},
+                "range":{"type":"string","description":"time slice t0:t1 for stats/measure/export"},
+                "signal":{"type":["string","array"],"description":"signal(s) to export","items":{"type":"string"}},
+                "max_points":{"type":"integer","minimum":1},
+                "base_signal":{"type":"string"},
+                "export_raw":{"type":"string","description":"raw export: format csv|json|parquet OR legacy output path (/tmp/x.raw|.json|.csv — format inferred, file copied there)"},
+                "timeout":{"type":"string","description":"sim timeout (e.g. 60s)"}
+            },"required":["file"]
         }));
         self.register(
             "netlist_validate",
-            "Validate SPICE netlist/schematic",
+            "Validate SPICE netlist syntax (.cir). Run before netlist_run; also auto-runs after write/edit of .cir/.sp/.flxsch.",
             json!({
                 "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
             }),
         );
         self.register(
             "erc",
-            "Run ERC/DRC check",
+            "Run electrical rules check (ERC) on a .flxsch schematic. Run before pcb-compose.",
+            json!({
+                "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
+            }),
+        );
+        self.register(
+            "drc",
+            "Run design rules check (DRC) on a .pcb layout. Alias of pcb-validate/pcb-drc.",
             json!({
                 "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
             }),
         );
         self.register(
             "pcb_validate",
-            "Run pcb-validate DRC",
+            "Validate PCB layout and run DRC (pcb-validate). Run before pcb-compose --auto-route.",
             json!({
                 "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
             }),
@@ -110,17 +134,42 @@ impl ToolRegistry {
             }),
         );
 
-        self.register("pcb_compose", "Programmatically add/update/remove components/traces/vias on PCB (supports --auto-route, --add-component/trace/via, --route-layers)", json!({
+        self.register("pcb_compose", "Programmatically add/update/remove components/traces/vias on PCB. Validate erc/drc first; after compose run pcb_render (vision) + pcb_validate.", json!({
             "type":"object","properties":{
                 "file":{"type":"string","description":"input .pcb file"},
-                "add_component":{"type":"string","description":"footprint=...,x=...,y=..."},
-                "add_trace":{"type":"string"},
-                "add_via":{"type":"string"},
-                "auto_route":{"type":"boolean"},
+                "add_component":{"type":"string","description":"footprint=...,x=...,y=...,rotation=...,layer=...,name=...,value=..."},
+                "add_trace":{"type":"string","description":"x1=...,y1=...,x2=...,y2=...,width=...,layer=...,net=..."},
+                "add_via":{"type":"string","description":"x=...,y=...,diameter=...,drill=...,net=..."},
+                "delete_item":{"type":"string","description":"id=... OR name=..."},
+                "shrink_outline":{"type":"string","description":"margin=<val_in_mm>"},
+                "add_netclass":{"type":"string","description":"name=...,width=...,clearance=..."},
+                "assign_net":{"type":"string","description":"net=...,class=..."},
+                "add_pour":{"type":"string","description":"layer=...,net=...,clearance=..."},
+                "auto_route":{"type":"boolean","description":"auto-route after compose (Ask-gated)"},
+                "allow_diagonals":{"type":"boolean","description":"allow 45-degree diagonals in auto-router"},
                 "route_layers":{"type":"string","enum":["top","bottom","both"]},
-                "out":{"type":"string"}
+                "out":{"type":"string","description":"output .pcb path"}
             },"required":["file"]
         }));
+        self.register("pcb_sync", "Synchronize a .pcb layout with a .flxsch schematic (incremental netlist/footprint import).", json!({
+            "type":"object","properties":{"file":{"type":"string","description":".pcb to update"},"schematic":{"type":"string","description":"source .flxsch"},"out":{"type":"string"}},"required":["file","schematic"]
+        }));
+        self.register("pcb_export", "Export PCB to manufacturing formats (gerber|pdf|step|iges|ipc2581|odb|pos).", json!({
+            "type":"object","properties":{"file":{"type":"string"},"format":{"type":"string","enum":["gerber","pdf","step","iges","ipc2581","odb","pos"]},"output":{"type":"string","description":"output dir or file (default ./output)"}},"required":["file"]
+        }));
+        self.register("pcb_autoroute", "Run multi-layer auto-router on a .pcb file (standalone; pcb-compose --auto-route composes+routes).", json!({
+            "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"},"ripup":{"type":"boolean","description":"rip up existing traces/vias first"},"grid":{"type":"number","description":"grid mm (default 0.5)"}},"required":["file"]
+        }));
+        self.register("pcb_cleanup", "Board cleanup: purge dangling tracks/vias, zero-length tracks, duplicate vias, merge collinear segments.", json!({
+            "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"}},"required":["file"]
+        }));
+        self.register(
+            "pcb_netlist",
+            "Dump detailed netlist/connectivity report of a .pcb file.",
+            json!({
+                "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
+            }),
+        );
         self.register("pcb_init", "Initialize new PCB layout (standalone or from schematic)", json!({
             "type":"object","properties":{"file":{"type":"string"},"from_schematic":{"type":"string"}},"required":["file"]
         }));
@@ -137,17 +186,43 @@ impl ToolRegistry {
         self.register("pcb_query", "Query PCB layout file for details", json!({
             "type":"object","properties":{"file":{"type":"string"},"query":{"type":"string"}},"required":["file"]
         }));
+        self.register("schematic_netlist", "Generate SPICE or JSON netlist from a .flxsch schematic.", json!({
+            "type":"object","properties":{"file":{"type":"string"},"format":{"type":"string","enum":["spice","json"]},"analysis":{"type":"string","enum":["op","tran","ac"]},"step":{"type":"string"},"stop":{"type":"string"},"out":{"type":"string"}},"required":["file"]
+        }));
+        self.register("schematic_bom", "Generate Bill of Materials (BOM) from a .flxsch schematic.", json!({
+            "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"}},"required":["file"]
+        }));
+        self.register("netlist_compare", "Compare schematic-generated netlist against an external netlist.", json!({
+            "type":"object","properties":{"schematic":{"type":"string","description":".flxsch source"},"netlist":{"type":"string","description":"external .cir to compare"},"analysis":{"type":"string"},"step":{"type":"string"},"stop":{"type":"string"}},"required":["schematic","netlist"]
+        }));
+        self.register("autofix", "Attempt automatic fix of common schematic/PCB ERC/DRC violations.", json!({
+            "type":"object","properties":{"file":{"type":"string","description":".flxsch or .pcb file"},"out":{"type":"string"}},"required":["file"]
+        }));
         self.register("raw_info", "Display info about .raw simulation file (--summary)", json!({
             "type":"object","properties":{"file":{"type":"string"},"summary":{"type":"boolean"}},"required":["file"]
         }));
-        self.register("raw_stats", "Compute signal metrics (min/max/avg/RMS) for .raw", json!({
-            "type":"object","properties":{"file":{"type":"string"},"signal":{"type":"string"}},"required":["file"]
+        self.register("raw_stats", "Compute signal metrics (min/max/avg/RMS) for .raw. Pair with raw_export for slices.", json!({
+            "type":"object","properties":{"file":{"type":"string"},"signal":{"type":"string","description":"repeatable in viora; comma-join or repeat via array"},"range":{"type":"string","description":"t0:t1 slice"}},"required":["file"]
         }));
         self.register(
             "symbol_list",
             "List symbols in folder or .sclib",
             json!({
                 "type":"object","properties":{"path":{"type":"string"}},"required":[]
+            }),
+        );
+        self.register(
+            "symbol_validate",
+            "Validate .viosym symbol file compliance.",
+            json!({
+                "type":"object","properties":{"file":{"type":"string"}},"required":["file"]
+            }),
+        );
+        self.register(
+            "footprint_import",
+            "Import KiCad footprint (.kicad_mod) to VioraEDA (.json).",
+            json!({
+                "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"},"render":{"type":"boolean"},"limit":{"type":"integer","minimum":1}},"required":["file"]
             }),
         );
         self.register("symbol_render", "Render .viosym symbol to PNG", json!({
@@ -159,8 +234,17 @@ impl ToolRegistry {
         self.register("flux", "Run FluxScript integration (flux eval/run/validate) — experimental", json!({
             "type":"object","properties":{"command":{"type":"string","enum":["eval","run","validate"]},"file":{"type":"string"},"script":{"type":"string"}},"required":["command"]
         }));
-        self.register("raw_export", "Export .raw waveform to json/csv", json!({
-            "type":"object","properties":{"file":{"type":"string"},"out":{"type":"string"},"format":{"type":"string"}},"required":["file"]
+        self.register("raw_export", "Export .raw waveform to json/csv/parquet. Follow netlist_run --export-raw; preview capped, full file at out.", json!({
+            "type":"object","properties":{
+                "file":{"type":"string"},
+                "out":{"type":"string"},
+                "format":{"type":"string","enum":["json","csv","parquet"]},
+                "signal":{"type":["string","array"],"items":{"type":"string"}},
+                "signal_regex":{"type":"string"},
+                "max_points":{"type":"integer","minimum":1},
+                "base_signal":{"type":"string"},
+                "range":{"type":"string","description":"t0:t1 slice"}
+            },"required":["file"]
         }));
         self.register("netlist_to_schematic", "Convert .cir netlist to .flxsch schematic (netlist-first workflow)", json!({
             "type":"object","properties":{"file":{"type":"string","description":"input .cir path"},"out":{"type":"string","description":"output .flxsch path"}},"required":["file"]
@@ -385,8 +469,29 @@ mod tests {
             "dev_serve",
             "viora",
             "netlist_run",
+            "netlist_validate",
+            "netlist_to_schematic",
+            "netlist_compare",
             "schematic_render",
+            "schematic_query",
+            "schematic_validate",
+            "schematic_netlist",
+            "schematic_bom",
             "erc",
+            "drc",
+            "pcb_validate",
+            "pcb_compose",
+            "pcb_sync",
+            "pcb_export",
+            "pcb_autoroute",
+            "pcb_cleanup",
+            "pcb_netlist",
+            "pcb_query",
+            "autofix",
+            "symbol_validate",
+            "footprint_import",
+            "raw_export",
+            "raw_stats",
         ] {
             assert!(n.contains(&must), "missing tool: {must}");
         }

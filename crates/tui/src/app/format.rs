@@ -333,6 +333,91 @@ pub(crate) fn pretty_tool_args_wide(name: &str, args: &str, wide: bool) -> Strin
                 }
                 return short;
             }
+            "netlist_run"
+            | "netlist_validate"
+            | "schematic_render"
+            | "schematic_validate"
+            | "schematic_query"
+            | "schematic_netlist"
+            | "schematic_bom"
+            | "netlist_compare"
+            | "netlist_to_schematic"
+            | "pcb_render"
+            | "pcb_query"
+            | "pcb_validate"
+            | "pcb_netlist"
+            | "pcb_sync"
+            | "pcb_export"
+            | "pcb_autoroute"
+            | "pcb_cleanup"
+            | "pcb_compose"
+            | "pcb_init"
+            | "erc"
+            | "drc"
+            | "autofix"
+            | "raw_info"
+            | "raw_stats"
+            | "raw_export"
+            | "symbol_validate"
+            | "footprint_import" => {
+                let file = v
+                    .get("file")
+                    .or_else(|| v.get("path"))
+                    .or_else(|| v.get("schematic"))
+                    .or_else(|| v.get("netlist"))
+                    .and_then(|x| x.as_str())
+                    .unwrap_or("");
+                let short = if file.is_empty() {
+                    String::new()
+                } else {
+                    rel_in_str(file)
+                };
+                let mut flags: Vec<String> = Vec::new();
+                for (k, label) in [
+                    ("analysis", ""),
+                    ("measure", "measure"),
+                    ("assert", "assert"),
+                    ("export_raw", "export"),
+                    ("format", ""),
+                    ("auto_route", "auto-route"),
+                    ("ripup", "ripup"),
+                ] {
+                    if let Some(val) = v.get(k) {
+                        if val.as_bool() == Some(true) {
+                            flags.push(label.to_string());
+                        } else if let Some(s) = val.as_str() {
+                            if !s.is_empty() {
+                                if label.is_empty() {
+                                    flags.push(s.to_string());
+                                } else {
+                                    flags.push(format!("{label}={s}"));
+                                }
+                            }
+                        } else if val.is_array() {
+                            flags.push(format!(
+                                "{label}×{}",
+                                val.as_array().map(|a| a.len()).unwrap_or(0)
+                            ));
+                        }
+                    }
+                }
+                if short.is_empty() && flags.is_empty() {
+                    return String::new();
+                }
+                if flags.is_empty() {
+                    return short;
+                }
+                if short.is_empty() {
+                    return flags.join(" ");
+                }
+                let flag_str = flags.join(" ");
+                let cap = if wide { 600 } else { 160 };
+                let combined = format!("{short} {flag_str}");
+                if combined.chars().count() > cap {
+                    return format!("{}…", truncate_chars(&combined, cap));
+                }
+                return combined;
+            }
             _ => {}
         }
 
