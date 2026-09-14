@@ -2,39 +2,27 @@ pub(crate) async fn cmd_doctor(config: Option<String>) -> anyhow::Result<()> {
     println!("VioraHarness doctor");
 
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let viospice_root = std::env::var("VIOSPICE_ROOT")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| {
-            format!(
-                "{}/qt_projects/viospice",
-                std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
-            )
-        });
-    let cwd_is_viospice =
-        cwd.to_string_lossy().contains("viospice") || cwd.starts_with(&viospice_root);
+    // Binary resolution mirrors `resolve_viora`: explicit `VIORA_BIN` first,
+    // otherwise the first `viora` on PATH. No checkout/build/output paths —
+    // the harness invokes the installed binary and never enters source trees.
     let mut candidates: Vec<String> = Vec::new();
+    if let Ok(bin) = std::env::var("VIORA_BIN") {
+        if !bin.trim().is_empty() {
+            candidates.push(bin);
+        }
+    }
 
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in path_var.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
             let p = format!("{dir}/viora");
             if std::path::Path::new(&p).exists() {
                 candidates.push(p);
                 break;
             }
         }
-    }
-    let home_local = format!(
-        "{}/.local/bin/viora",
-        std::env::var("HOME").unwrap_or_default()
-    );
-    if std::path::Path::new(&home_local).exists() {
-        candidates.push(home_local);
-    }
-
-    if cwd_is_viospice {
-        candidates.push(format!("{viospice_root}/build/viora"));
-        candidates.push(format!("{viospice_root}/build-debug/viora"));
     }
     candidates.push("viora".into());
     let mut found = None;
@@ -49,18 +37,21 @@ pub(crate) async fn cmd_doctor(config: Option<String>) -> anyhow::Result<()> {
         }
     }
     match found {
-                Some((p, v)) => println!("  viora: {p} ({v})"),
-                None => println!(
-                    "  viora: not found (global `viora` in PATH not found, or build with `cmake -B build` in ~/qt_projects/viospice when in VioraEDA)"
-                ),
-            }
+        Some((p, v)) => println!("  viora: {p} ({v})"),
+        None => println!("  viora: not found (set VIORA_BIN or put `viora` on PATH)"),
+    }
 
+    // Examples live in the working project, or in an explicitly exported
+    // `VIOSPICE_ROOT` checkout — never a hardcoded home-directory path.
     let cwd_examples = cwd.join("examples");
-    let viospice_examples = format!("{viospice_root}/examples");
+    let env_examples = std::env::var("VIOSPICE_ROOT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(|r| format!("{}/examples", r.trim_end_matches('/')));
     let demo = if cwd_examples.exists() {
         cwd_examples.to_string_lossy().to_string()
     } else {
-        viospice_examples.to_string()
+        env_examples.unwrap_or_else(|| cwd_examples.to_string_lossy().to_string())
     };
     println!(
         "  examples: {} ({})",

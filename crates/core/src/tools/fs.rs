@@ -243,9 +243,6 @@ pub async fn write_file(args: Value) -> Value {
     let old_content = fs::read_to_string(&path).await.unwrap_or_default();
     let old_lines = old_content.lines().count();
 
-    let _rel =
-        crate::tools::viora::relativize_if_under_base(&path, &crate::tools::viora::viospice_root());
-
     match fs::write(&path, content).await {
         Ok(_) => {
             let new_lines = content.lines().count();

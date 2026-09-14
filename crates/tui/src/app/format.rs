@@ -131,22 +131,16 @@ pub(crate) fn home_prefix() -> String {
 
 pub(crate) fn rel_path(p: &str) -> String {
     let home = home_prefix();
-    let viospice_abs = format!("{home}/qt_projects/viospice/");
     let mut s = p.to_string();
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_str = cwd.to_string_lossy().to_string();
         if s.starts_with(&cwd_str) {
             let rel = s[cwd_str.len()..].trim_start_matches('/').to_string();
             s = if rel.is_empty() { ".".into() } else { rel };
-        } else if s.starts_with(&viospice_abs) {
-            s = s.replacen(&viospice_abs, "viospice/", 1);
         }
     }
     if s.starts_with(&format!("{home}/")) {
         s = s.replacen(&format!("{home}/"), "~/", 1);
-    }
-    if s.starts_with("~/qt_projects/viospice/") {
-        s = s.replacen("~/qt_projects/viospice/", "viospice/", 1);
     }
     if s.len() > 150 {
         format!("…{}", &s[s.len() - 150..])
@@ -157,7 +151,6 @@ pub(crate) fn rel_path(p: &str) -> String {
 
 pub(crate) fn rel_in_str(s: &str) -> String {
     let home = home_prefix();
-    let viospice_abs = format!("{home}/qt_projects/viospice/");
     let mut out = s.to_string();
     if let Ok(cwd) = std::env::current_dir() {
         let cwd_str = cwd.to_string_lossy().to_string();
@@ -165,9 +158,7 @@ pub(crate) fn rel_in_str(s: &str) -> String {
             out = out.replace(&cwd_str, ".");
         }
     }
-    out.replace(&viospice_abs, "viospice/")
-        .replace("~/qt_projects/viospice/", "viospice/")
-        .replace(&format!("{home}/"), "~/")
+    out.replace(&format!("{home}/"), "~/")
 }
 
 pub(crate) fn summarize_todos(todos: &[serde_json::Value], done_override: Option<u64>) -> String {

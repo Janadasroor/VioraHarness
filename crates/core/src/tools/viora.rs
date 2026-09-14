@@ -5,55 +5,36 @@ use tokio::process::Command;
 
 const VIORA_TIMEOUT_SECS: u64 = 120;
 
-pub fn home_dir() -> String {
-    std::env::var("HOME").unwrap_or_else(|_| "/tmp".into())
-}
-
-pub fn viospice_root() -> String {
+/// Optional VioraEDA checkout root, explicit opt-in via `VIOSPICE_ROOT` only.
+///
+/// No hardcoded fallback: the harness must not assume where (or whether) the
+/// VioraEDA source tree lives. The file jail never grants it access; tools
+/// only ever invoke the `viora` *binary* (see [`resolve_viora`]).
+pub fn viospice_root() -> Option<String> {
     std::env::var("VIOSPICE_ROOT")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("{}/qt_projects/viospice", home_dir()))
 }
 
+/// Resolve the `viora` binary: explicit `VIORA_BIN` wins, otherwise the first
+/// `viora` found on `PATH` (which already covers install locations such as
+/// `~/.local/bin`). No hardcoded checkout/build/output paths — installers put
+/// `viora` on PATH; the harness must never reach into a source tree.
 pub fn resolve_viora() -> String {
     if let Ok(p) = std::env::var("VIORA_BIN") {
-        if !p.is_empty() {
+        if !p.trim().is_empty() {
             return p;
         }
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in path_var.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
             let cand = Path::new(dir).join("viora");
             if cand.exists() {
                 return cand.to_string_lossy().to_string();
-            }
-        }
-    }
-
-    let local_bin = format!(
-        "{}/.local/bin/viora",
-        std::env::var("HOME").unwrap_or_default()
-    );
-    if Path::new(&local_bin).exists() {
-        return local_bin;
-    }
-
-    if let Ok(cwd) = std::env::current_dir() {
-        let viospice_root = viospice_root();
-        let cwd_is_viospice =
-            cwd.starts_with(&viospice_root) || cwd.to_string_lossy().contains("viospice");
-        if cwd_is_viospice {
-            for cand in [
-                format!("{viospice_root}/build/viora"),
-                format!("{viospice_root}/build-debug/viora"),
-                format!("{viospice_root}/build-asan/viora"),
-                format!("{viospice_root}/build-release/viora"),
-            ] {
-                if Path::new(&cand).exists() {
-                    return cand;
-                }
             }
         }
     }
@@ -310,7 +291,11 @@ pub fn is_within_root(path: &Path) -> bool {
         return true;
     }
 
-    let viospice_root = viospice_root();
+    // NOTE: the VioraEDA source tree is deliberately NOT an allowed root —
+    // the harness drives the `viora` binary via PATH/VIORA_BIN and must not
+    // read or write the simulator's own sources, even when cwd sits inside
+    // a checkout (e.g. `VIOSPICE_ROOT` set for examples). Explicit per-call
+    // approval (`VIORAHARNESS_APPROVED_CALL`) still lifts the jail.
 
     let harness_root = std::env::var("VIORAHARNESS_ROOT")
         .ok()
@@ -338,19 +323,8 @@ pub fn is_within_root(path: &Path) -> bool {
         harness_root
     };
     let cwd_path = cwd.clone();
-    let viospice_path = PathBuf::from(&viospice_root);
     let harness_path = PathBuf::from(&harness_root);
 
-    let cwd_is_viospice = cwd_path.starts_with(&viospice_path)
-        || cwd
-            .canonicalize()
-            .ok()
-            .zip(viospice_path.canonicalize().ok())
-            .map(|(a, b)| a.starts_with(b))
-            .unwrap_or(false);
-    if cwd_is_viospice && check(&viospice_root) {
-        return true;
-    }
     let cwd_is_harness = cwd_path.starts_with(&harness_path)
         || cwd
             .canonicalize()
@@ -478,6 +452,79 @@ mod tests {
         assert!(is_within_root(Path::new("/tmp/anything.txt")));
         assert!(!is_within_root(Path::new("/etc/passwd")));
         assert!(!is_within_root(Path::new("/home/someone-else/x")));
+    }
+
+    #[test]
+    fn viospice_root_is_opt_in_only() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIOSPICE_ROOT").ok();
+        std::env::remove_var("VIOSPICE_ROOT");
+        assert_eq!(viospice_root(), None, "no hardcoded checkout fallback");
+        std::env::set_var("VIOSPICE_ROOT", "/opt/viora-checkout");
+        assert_eq!(viospice_root(), Some("/opt/viora-checkout".to_string()));
+        match prev {
+            Some(v) => std::env::set_var("VIOSPICE_ROOT", v),
+            None => std::env::remove_var("VIOSPICE_ROOT"),
+        }
+    }
+
+    #[test]
+    fn resolve_viora_never_probes_checkout_paths() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_bin = std::env::var("VIORA_BIN").ok();
+        let prev_path = std::env::var("PATH").ok();
+        let prev_root = std::env::var("VIOSPICE_ROOT").ok();
+        // Fake checkout with a build-tree binary: the resolver must ignore it.
+        let dir = std::env::temp_dir().join(format!("vh-noprobe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let build = dir.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(build.join("viora"), b"fake").unwrap();
+        std::env::set_var("VIOSPICE_ROOT", &dir);
+        std::env::remove_var("VIORA_BIN");
+        let empty = std::env::temp_dir().join(format!("vh-empty-path-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&empty);
+        std::fs::create_dir_all(&empty).unwrap();
+        std::env::set_var("PATH", &empty);
+        assert_eq!(
+            resolve_viora(),
+            "viora",
+            "VIORA_BIN unset + empty PATH falls back to PATH lookup, never build/ dirs"
+        );
+        match prev_bin {
+            Some(v) => std::env::set_var("VIORA_BIN", v),
+            None => std::env::remove_var("VIORA_BIN"),
+        }
+        match prev_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        match prev_root {
+            Some(v) => std::env::set_var("VIOSPICE_ROOT", v),
+            None => std::env::remove_var("VIOSPICE_ROOT"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&empty);
+    }
+
+    #[test]
+    fn jail_denies_simulator_sources() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIOSPICE_ROOT").ok();
+        std::env::set_var("VIOSPICE_ROOT", "/opt/viora-checkout");
+        // Even with the checkout root exported, its sources stay outside
+        // the jail (cwd is the harness repo here, /opt is neither cwd,
+        // harness root, /tmp, nor logs).
+        assert!(!is_within_root(Path::new(
+            "/opt/viora-checkout/cli/main.cpp"
+        )));
+        assert!(!is_within_root(Path::new(
+            "/opt/viora-checkout/build/viora"
+        )));
+        match prev {
+            Some(v) => std::env::set_var("VIOSPICE_ROOT", v),
+            None => std::env::remove_var("VIOSPICE_ROOT"),
+        }
     }
 }
 

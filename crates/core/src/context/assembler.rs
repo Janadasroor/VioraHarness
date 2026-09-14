@@ -60,12 +60,9 @@ pub fn assemble_context_in_mode(prompt: &str, mode: Option<&str>) -> AssembledCo
         agents_cands.push(cwd.join("AGENTS.md").to_string_lossy().to_string());
     }
 
-    if cwd.contains("viospice") {
-        agents_cands.push(format!(
-            "{}/AGENTS.md",
-            crate::tools::viora::viospice_root()
-        ));
-    }
+    // NOTE: never pull AGENTS.md from the VioraEDA source tree — the harness
+    // must not read the simulator's own sources. Project instructions come
+    // from the working directory only.
     for cand in agents_cands {
         if Path::new(&cand).exists() {
             if let Ok(content) = std::fs::read_to_string(&cand) {

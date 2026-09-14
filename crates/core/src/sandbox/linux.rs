@@ -8,7 +8,25 @@ pub fn is_bwrap_available() -> bool {
         .unwrap_or(false)
 }
 
+/// Writable runtime state dir for the `viora` daemon socket (NOT source code).
+///
+/// Explicit `VIORA_STATE_DIR` wins, then `$XDG_DATA_HOME/viora`, then the
+/// `~/.local/share/viora` default. The bind keeps the daemon reachable
+/// inside the sandbox; without it every call pays a socket-retry hang.
 pub fn viora_state_dir() -> Option<String> {
+    if let Ok(dir) = std::env::var("VIORA_STATE_DIR") {
+        if !dir.trim().is_empty() {
+            std::fs::create_dir_all(&dir).ok()?;
+            return Path::new(&dir).exists().then_some(dir);
+        }
+    }
+    if let Ok(xdg) = std::env::var("XDG_DATA_HOME") {
+        if !xdg.trim().is_empty() {
+            let dir = format!("{}/viora", xdg.trim_end_matches('/'));
+            std::fs::create_dir_all(&dir).ok()?;
+            return Path::new(&dir).exists().then_some(dir);
+        }
+    }
     let home = std::env::var("HOME")
         .ok()
         .filter(|s| !s.trim().is_empty())?;
@@ -219,9 +237,38 @@ mod tests {
 
     #[test]
     fn viora_state_dir_shape() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_state = std::env::var("VIORA_STATE_DIR").ok();
+        let prev_xdg = std::env::var("XDG_DATA_HOME").ok();
+        std::env::remove_var("VIORA_STATE_DIR");
+        std::env::remove_var("XDG_DATA_HOME");
         let d = viora_state_dir().expect("HOME is set in test env");
         assert!(d.ends_with(".local/share/viora"), "{d}");
         assert!(Path::new(&d).exists(), "created on demand");
+        match prev_state {
+            Some(v) => std::env::set_var("VIORA_STATE_DIR", v),
+            None => std::env::remove_var("VIORA_STATE_DIR"),
+        }
+        match prev_xdg {
+            Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+            None => std::env::remove_var("XDG_DATA_HOME"),
+        }
+    }
+
+    #[test]
+    fn viora_state_dir_env_override_wins() {
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORA_STATE_DIR").ok();
+        let dir = std::env::temp_dir().join(format!("vh-viora-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("VIORA_STATE_DIR", &dir);
+        let d = viora_state_dir().expect("override dir is created");
+        assert_eq!(d, dir.to_string_lossy().to_string(), "{d}");
+        match prev {
+            Some(v) => std::env::set_var("VIORA_STATE_DIR", v),
+            None => std::env::remove_var("VIORA_STATE_DIR"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -302,9 +349,10 @@ mod tests {
         let mut cmd = tokio::process::Command::new("true");
         wrap_command(&mut cmd, "/tmp");
         let dbg = format!("{:?}", cmd.as_std());
+        let dir = viora_state_dir().expect("state dir resolves in test env");
         assert!(
-            dbg.contains(".local/share/viora"),
-            "viora state dir bound writable: {dbg}"
+            dbg.contains(&dir),
+            "viora state dir bound writable ({dir}): {dbg}"
         );
     }
 }

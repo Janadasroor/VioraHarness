@@ -1,25 +1,22 @@
 use vioraharness_core::tools;
 
+/// Skip-gate: true when a `viora` binary is reachable via `VIORA_BIN` or
+/// `PATH` (same resolution as the harness itself — no checkout paths).
 fn viora_built() -> bool {
-    if let Ok(root) = std::env::var("VIOSPICE_ROOT") {
-        if std::path::Path::new(&format!("{root}/build/viora")).exists() {
+    if let Ok(bin) = std::env::var("VIORA_BIN") {
+        if !bin.trim().is_empty() && std::path::Path::new(&bin).exists() {
             return true;
         }
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    if std::path::Path::new(&format!("{home}/qt_projects/viospice/build/viora")).exists() {
-        return true;
-    }
-
     if let Ok(path_var) = std::env::var("PATH") {
         for dir in path_var.split(':') {
+            if dir.is_empty() {
+                continue;
+            }
             if std::path::Path::new(&format!("{dir}/viora")).exists() {
                 return true;
             }
         }
-    }
-    if std::path::Path::new(&format!("{home}/.local/bin/viora")).exists() {
-        return true;
     }
     false
 }
