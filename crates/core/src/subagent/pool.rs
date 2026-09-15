@@ -207,6 +207,10 @@ impl SubagentPool {
             &mode_label,
             child_depth,
         );
+        // The transcript lives in its own session (`sub-<run id>`): Enter
+        // on the finished run opens that session as the subagent's view.
+        let session_id = format!("{}{}", crate::subagent::tracker::SUB_SESSION_PREFIX, run_id);
+        crate::subagent::tracker::set_run_session(&run_id, &session_id);
         let timeout = crate::subagent::tracker::subagent_timeout();
         let fut = Self::execute(
             kind,
@@ -216,6 +220,7 @@ impl SubagentPool {
             mode_label,
             child_depth,
             parent.model,
+            session_id,
         );
         let handle = tokio::spawn(async move {
             match tokio::time::timeout(timeout, fut).await {
@@ -275,6 +280,8 @@ impl SubagentPool {
             &parent_mode,
             child_depth,
         );
+        let session_id = format!("{}{}", crate::subagent::tracker::SUB_SESSION_PREFIX, run_id);
+        crate::subagent::tracker::set_run_session(&run_id, &session_id);
         let run_id_inner = run_id.clone();
         let timeout = crate::subagent::tracker::subagent_timeout();
         let handle = tokio::spawn(async move {
@@ -294,6 +301,7 @@ impl SubagentPool {
                 parent_mode,
                 child_depth,
                 parent.model,
+                session_id,
             );
             let res = match tokio::time::timeout(timeout, fut).await {
                 Ok(r) => r,
@@ -314,8 +322,9 @@ impl SubagentPool {
     }
 
     /// Untracked runner shared by all spawn paths: model → filtered
-    /// registry → loop run at `child_depth`. Callers own tracking
-    /// (start/finish) and timeout.
+    /// registry → loop run at `child_depth` in its own `session_id`
+    /// (the transcript /agents opens as the subagent's view). Callers own
+    /// tracking (start/finish) and timeout.
     #[allow(clippy::too_many_arguments)]
     async fn execute(
         kind: SubagentKind,
@@ -325,6 +334,7 @@ impl SubagentPool {
         mode_label: String,
         child_depth: usize,
         parent_model: Option<String>,
+        session_id: String,
     ) -> anyhow::Result<String> {
         let model = match model_override {
             Some(m) => m,
@@ -380,7 +390,7 @@ impl SubagentPool {
 
         let full_prompt = format!("{}\n\nTask: {}", kind.system_extra(), prompt);
         loop_
-            .run_with_depth(&full_prompt, &model, None, child_depth)
+            .run_with_depth(&full_prompt, &model, Some(session_id), child_depth)
             .await
     }
 
@@ -408,7 +418,19 @@ impl SubagentPool {
                     &parent_mode,
                     1,
                 );
-                let fut = Self::execute(kind, prompt, None, parent_allow, parent_mode, 1, None);
+                let session_id =
+                    format!("{}{}", crate::subagent::tracker::SUB_SESSION_PREFIX, run_id);
+                crate::subagent::tracker::set_run_session(&run_id, &session_id);
+                let fut = Self::execute(
+                    kind,
+                    prompt,
+                    None,
+                    parent_allow,
+                    parent_mode,
+                    1,
+                    None,
+                    session_id,
+                );
                 let res = match tokio::time::timeout(timeout, fut).await {
                     Ok(r) => r,
                     Err(_) => Err(anyhow::anyhow!(

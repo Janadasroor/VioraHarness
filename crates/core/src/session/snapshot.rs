@@ -48,6 +48,11 @@ impl UndoStack {
     }
 
     pub async fn push(&self, session_id: &str, seq: i64, path: &str) {
+        // Subagent transcripts (`sub-`) are single-shot runs: no undo fuel,
+        // and gc never sees their session rows (hidden from chat lists).
+        if session_id.starts_with(crate::subagent::tracker::SUB_SESSION_PREFIX) {
+            return;
+        }
         if let Ok(bytes) = std::fs::read(path) {
             let sha = sha256_of_bytes(&bytes);
             let snap = Snapshot {
@@ -326,6 +331,34 @@ mod tests {
             Some(v) => std::env::set_var("VIORAHARNESS_DB", v),
             None => std::env::remove_var("VIORAHARNESS_DB"),
         }
+        let _ = std::fs::remove_dir_all(&work);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn undo_stack_skips_subagent_sessions() {
+        // Subagent transcripts are single-shot runs: no undo fuel, and gc
+        // never sees their (list-hidden) session rows.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_cwd = std::env::current_dir().unwrap();
+        let work = std::env::temp_dir().join(format!("vh_snapsub_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&work);
+        std::fs::create_dir_all(&work).unwrap();
+        std::env::set_current_dir(&work).unwrap();
+
+        let target = work.join("f.txt");
+        std::fs::write(&target, b"data").unwrap();
+        let stack = UndoStack::new();
+        stack
+            .push("sub-sa_test9", 1, target.to_str().unwrap())
+            .await;
+        assert!(stack.list("sub-sa_test9").await.is_empty(), "nothing kept");
+        assert!(
+            !work.join(".vioraharness/snapshots/sub-sa_test9").exists(),
+            "no snapshot files"
+        );
+
+        std::env::set_current_dir(&prev_cwd).unwrap();
         let _ = std::fs::remove_dir_all(&work);
     }
 

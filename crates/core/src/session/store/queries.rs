@@ -56,6 +56,10 @@ impl SessionStore {
         let mut sql = String::from(
             "SELECT id, created_at, COALESCE(updated_at, created_at), model, status, title, cwd, project_hash, parent_id, archived_at, model_last, theme, mode FROM sessions WHERE 1=1",
         );
+        // Subagent transcripts (`sub-`) are opened from /agents via their
+        // linked run — never user chats, so they stay out of pickers,
+        // recent lists, counts and `--continue` resolution.
+        sql.push_str(" AND id NOT LIKE 'sub-%'");
         if !include_archived {
             sql.push_str(" AND archived_at IS NULL");
         }
@@ -230,9 +234,9 @@ impl SessionStore {
     pub fn count_sessions(&self, include_archived: bool) -> Result<i64> {
         let conn = self.pool.get()?;
         let sql = if include_archived {
-            "SELECT COUNT(*) FROM sessions"
+            "SELECT COUNT(*) FROM sessions WHERE id NOT LIKE 'sub-%'"
         } else {
-            "SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL"
+            "SELECT COUNT(*) FROM sessions WHERE archived_at IS NULL AND id NOT LIKE 'sub-%'"
         };
         Ok(conn.query_row(sql, [], |r| r.get(0))?)
     }

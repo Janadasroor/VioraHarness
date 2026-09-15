@@ -66,6 +66,11 @@ pub struct SubagentRun {
     /// File holding the complete result, like background-task logs.
     /// Always written on finish (best-effort); survives restarts.
     pub log_path: Option<String>,
+    /// Chat session holding this run's transcript (`sub-<run id>`).
+    /// Enter on a finished run opens this session: the subagent's own
+    /// view instead of a summary buried in main chat. `None` for rows
+    /// from before the link existed.
+    pub session_id: Option<String>,
     /// Completion already surfaced (TUI notice / follow-up turn).
     pub notified: bool,
 }
@@ -148,6 +153,12 @@ const MAX_DB_KEPT: i64 = 100;
 /// Re-hydrates when the path changes (persistence tests point at temp DBs).
 static HYDRATED_FOR: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 
+/// Prefix for the chat sessions holding subagent transcripts.
+/// `sub-` sessions are the subagent's own view (opened from /agents) and
+/// are hidden from user chat lists (`list_sessions_filtered`,
+/// `latest_for_cwd`, counts) so they never hijack `--continue`/pickers.
+pub const SUB_SESSION_PREFIX: &str = "sub-";
+
 /// Shared DDL for the runs table (tracker `open_db` + `SessionStore::migrate`).
 pub(crate) const SUBAGENT_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS subagent_runs (
     id TEXT PRIMARY KEY,
@@ -163,8 +174,14 @@ pub(crate) const SUBAGENT_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS subagent
     result_full TEXT,
     result_truncated INTEGER NOT NULL DEFAULT 0,
     log_path TEXT,
-    notified INTEGER NOT NULL DEFAULT 0
+    notified INTEGER NOT NULL DEFAULT 0,
+    session_id TEXT
 );";
+
+/// ALTER for DBs created before the session link existed. Best-effort:
+/// duplicate-column on re-run is ignored by the caller.
+pub(crate) const SUBAGENT_COLUMN_SESSION: &str =
+    "ALTER TABLE subagent_runs ADD COLUMN session_id TEXT";
 
 /// Kill-switch: `VIORAHARNESS_SUBAGENT_PERSIST=0/off/false/no` disables all
 /// sqlite I/O (in-memory only). Anything else (unset included) persists.
@@ -224,24 +241,25 @@ fn open_db(path: &str) -> Option<rusqlite::Connection> {
     let conn = rusqlite::Connection::open(path).ok()?;
     let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
     let _ = conn.execute_batch(SUBAGENT_TABLE_SQL);
+    let _ = conn.execute(SUBAGENT_COLUMN_SESSION, []);
     Some(conn)
 }
 
 /// Best-effort write-through of one run. Never panics and never fails the
 /// caller — a bookkeeping path must not break turns.
 fn persist_run(run: &SubagentRun) {
-    let Some(path) = persist_db_path() else {
+    let Some(db_path) = persist_db_path() else {
         return;
     };
-    let Some(conn) = open_db(&path) else {
+    let Some(conn) = open_db(&db_path) else {
         return;
     };
     let _ = conn.execute(
         "INSERT OR REPLACE INTO subagent_runs
          (id, kind, prompt_preview, full_prompt, mode, depth, started_at,
           finished_at, status, result_preview, result_full, result_truncated,
-          log_path, notified)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+          log_path, notified, session_id)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         rusqlite::params![
             run.id,
             run.kind,
@@ -257,6 +275,7 @@ fn persist_run(run: &SubagentRun) {
             run.result_truncated as i32,
             run.log_path,
             run.notified as i32,
+            run.session_id,
         ],
     );
     let _ = conn.execute(
@@ -285,21 +304,23 @@ fn persist_snapshot(id: &str) {
     }
 }
 
-/// Merge persisted rows into memory (once per DB path). Rows still marked
+/// Merge persisted rows into memory (once per DB path). Recovered rows
+/// are SILENT history: `notified` is forced on so a restart never
+/// re-posts old error notices nor fires follow-up ("working without a
+/// prompt") turns for work from a dead process. Rows still marked
 /// `running` died with their process: flip them to `error` ("interrupted
-/// by restart") so they surface once via the normal completion drain
-/// instead of haunting `/agents` as running forever.
+/// by restart") — inspectable in /agents, never announced.
 fn hydrate_runs() {
-    let Some(path) = persist_db_path() else {
+    let Some(db_path) = persist_db_path() else {
         return;
     };
     {
         let done = HYDRATED_FOR.lock().unwrap_or_else(|e| e.into_inner());
-        if done.as_deref() == Some(path.as_str()) {
+        if done.as_deref() == Some(db_path.as_str()) {
             return;
         }
     }
-    let Some(conn) = open_db(&path) else {
+    let Some(conn) = open_db(&db_path) else {
         return;
     };
     let rows: Vec<SubagentRun> = (|| {
@@ -307,7 +328,7 @@ fn hydrate_runs() {
             .prepare(
                 "SELECT id, kind, prompt_preview, full_prompt, mode, depth, started_at,
                     finished_at, status, result_preview, result_full,
-                    result_truncated, log_path, notified
+                    result_truncated, log_path, notified, session_id
              FROM subagent_runs ORDER BY started_at DESC LIMIT ?1",
             )
             .ok()?;
@@ -331,6 +352,7 @@ fn hydrate_runs() {
                     result_truncated: row.get::<_, i64>(11).unwrap_or(0) != 0,
                     log_path: row.get(12)?,
                     notified: row.get::<_, i64>(13).unwrap_or(0) != 0,
+                    session_id: row.get(14).unwrap_or(None),
                 })
             })
             .ok()?;
@@ -338,7 +360,7 @@ fn hydrate_runs() {
     })()
     .unwrap_or_default();
     if rows.is_empty() {
-        *HYDRATED_FOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+        *HYDRATED_FOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(db_path);
         return;
     }
     let mut corrected = Vec::new();
@@ -356,16 +378,23 @@ fn hydrate_runs() {
                 run.result_full = Some("interrupted by restart (process exited)".into());
                 corrected.push(run.clone());
             }
+            // Silent history (see doc): never notify/wake for a life that
+            // ended before this process booted.
+            run.notified = true;
             runs.push_back(run);
         }
         while runs.len() > MAX_KEPT {
             runs.pop_front();
         }
     }
-    for run in corrected {
+    for mut run in corrected {
+        // Persist the interruption flip; notified stays as hydrated (the
+        // write-through below only persists notified for drained runs, and
+        // these never drain).
+        run.notified = true;
         persist_run(&run);
     }
-    *HYDRATED_FOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(path);
+    *HYDRATED_FOR.lock().unwrap_or_else(|e| e.into_inner()) = Some(db_path);
 }
 
 /// Record a spawn. Returns the run id. Depth is the number of
@@ -418,6 +447,7 @@ fn track_start_inner(
         result_full: None,
         result_truncated: false,
         log_path: None,
+        session_id: None,
         notified: false,
     });
     while runs.len() > MAX_KEPT {
@@ -509,6 +539,20 @@ pub fn register_handle(id: &str, handle: tokio::task::AbortHandle) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(id.to_string(), handle);
+}
+
+/// Link a run to the chat session holding its transcript (pool internal,
+/// right after spawn). The link persists with the row, so /agents can
+/// open the subagent's own view after restarts too.
+pub fn set_run_session(id: &str, session_id: &str) {
+    {
+        let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(run) = runs.iter_mut().rev().find(|r| r.id == id) else {
+            return;
+        };
+        run.session_id = Some(session_id.to_string());
+    }
+    persist_snapshot(id);
 }
 
 /// Cancel a running subagent (detached or blocking): aborts its task
@@ -821,27 +865,41 @@ mod tests {
             .find(|r| r.id == "sa_restart_done")
             .expect("surfaced row recovered");
         assert!(done.notified, "stays surfaced");
-        // The interrupted run surfaces exactly once; the old one never does.
-        let first: Vec<_> = take_completions()
-            .into_iter()
-            .filter(|r| r.id.starts_with("sa_restart_"))
-            .collect();
-        assert!(
-            first.iter().any(|r| r.id == "sa_restart_run"),
-            "interrupted drains once"
-        );
-        assert!(
-            first.iter().all(|r| r.id != "sa_restart_done"),
-            "surfaced stays quiet"
-        );
+        // Recovered rows are SILENT history: no notices, no wake turns
+        // for work from a dead process — inspectable in /agents only.
         assert!(
             take_completions()
                 .iter()
                 .all(|r| !r.id.starts_with("sa_restart_")),
-            "second drain is empty"
+            "hydrated rows never drain"
         );
         let (status, _, _) = db_row(&env.path, "sa_restart_run").expect("correction persisted");
         assert_eq!(status, "error");
+    }
+
+    #[test]
+    fn session_link_persists_with_row() {
+        let env = persist_env("session");
+        let (id, _) = track_start_at_depth("coder", &unique_prompt("sess"), "web", 1);
+        set_run_session(&id, "sub-sa_link9");
+        let run = list_runs()
+            .into_iter()
+            .find(|r| r.id == id)
+            .expect("run listed");
+        assert_eq!(run.session_id.as_deref(), Some("sub-sa_link9"));
+        let conn = rusqlite::Connection::open(&env.path).expect("temp db opens");
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM subagent_runs WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .expect("link persisted");
+        assert_eq!(stored.as_deref(), Some("sub-sa_link9"));
+        // Unknown ids never panic.
+        set_run_session("sa_nonexistent", "sub-nope");
+        track_finish(&id, true, "done");
+        let _ = take_completions();
     }
 
     #[test]

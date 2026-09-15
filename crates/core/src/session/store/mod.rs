@@ -224,6 +224,7 @@ impl SessionStore {
         // Subagent run history (tracker write-through; hydrated on read so
         // /agents survives restarts). Same DDL as the tracker's ensure.
         let _ = conn.execute_batch(crate::subagent::tracker::SUBAGENT_TABLE_SQL);
+        let _ = conn.execute(crate::subagent::tracker::SUBAGENT_COLUMN_SESSION, []);
         Ok(())
     }
 
@@ -298,6 +299,23 @@ pub fn project_hash_for_cwd(cwd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subagent_sessions_hidden_from_chat_lists() {
+        let s = mem_store();
+        s.create_session("user-chat", "m", Some("t")).unwrap();
+        s.create_session("sub-sa_abc123", "m", Some("t")).unwrap();
+        // Direct lookup still works — /agents opens sub transcripts by id.
+        assert!(s.get_session("sub-sa_abc123").unwrap().is_some());
+        // ...but they never surface as user chats (pickers, recent lists,
+        // counts, `--continue` resolution all route through here).
+        let listed = s.list_sessions_filtered(None, None, true, 50, 0).unwrap();
+        assert!(listed.iter().any(|x| x.id == "user-chat"));
+        assert!(listed.iter().all(|x| !x.id.starts_with("sub-")));
+        assert_eq!(s.list_sessions().unwrap().len(), 1);
+        assert_eq!(s.count_sessions(true).unwrap(), 1);
+        assert_eq!(s.count_sessions(false).unwrap(), 1);
+    }
 
     #[test]
     fn migrate_creates_subagent_runs_table() {
