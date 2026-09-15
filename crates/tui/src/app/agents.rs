@@ -3,10 +3,10 @@
 //! Rows are flat (one cursor across sections, like the Tasks panel):
 //! the live turn first, then subagent runs (active first), then
 //! background tasks (running first), then recent chats. Enter acts
-//! contextually: live closes, a finished subagent opens its linked
-//! transcript session (its own view), a running one posts its detail and
-//! keeps the dialog open live, task jumps to the Tasks panel focused on
-//! it, chat resumes it.
+//! contextually: live closes, a linked subagent opens its transcript
+//! session (its own view, live or finished — running transcripts are
+//! read-only), task jumps to the Tasks panel focused on it, chat resumes
+//! it. Unlinked legacy rows fall back to a detail post.
 //! Selection is id-anchored (`AgentRow::row_id`): the list re-sorts on
 //! every rebuild, so a bare index could land on another row by Enter
 //! time. Main chat also announces each launch with its title
@@ -319,14 +319,22 @@ impl App {
         }
     }
 
+    /// True while viewing a subagent transcript whose run is still live:
+    /// input stays out of the way (hidden box, swallowed edits, refused
+    /// turns) until it finishes. Finished transcripts are ordinary chats.
+    pub(crate) fn viewing_locked_subagent(&self) -> bool {
+        self.session_id.starts_with(tracker::SUB_SESSION_PREFIX)
+            && tracker::run_for_session(&self.session_id)
+                .is_some_and(|r| r.status == tracker::SubagentStatus::Running)
+    }
+
     /// Enter on the highlighted Agents row: contextual navigation.
     /// Id-anchored (see `resolve_agent_row`): entering a subagent can
-    /// never land on Live just because the list re-sorted. A finished
-    /// subagent opens its linked transcript session — the subagent's own
-    /// view, not a summary in main chat. A running one keeps the dialog
-    /// open so its status stays visible live — Enter again refreshes its
-    /// detail, Esc closes. Rows from before the session link fall back to
-    /// the detail post.
+    /// never land on Live just because the list re-sorted. A linked run
+    /// opens its transcript session — the subagent's own view — whether
+    /// finished or still running (a running transcript is read-only until
+    /// it finishes; back via /sessions). Rows from before the session
+    /// link fall back to the detail post.
     pub(crate) fn agents_activate(&mut self) {
         let Some(row) = self.resolve_agent_row() else {
             return;
@@ -338,20 +346,20 @@ impl App {
             }
             AgentRow::Subagent(run) => {
                 let running = run.status == tracker::SubagentStatus::Running;
-                if !running {
-                    if let Some(sid) = run.session_id.clone() {
-                        self.resume_chat(&sid);
-                        self.popup = Popup::None;
-                        return;
+                if let Some(sid) = run.session_id.clone() {
+                    if sid != self.session_id {
+                        self.return_session = Some(self.session_id.clone());
                     }
+                    self.resume_chat(&sid);
+                    self.popup = Popup::None;
+                    if running {
+                        self.status =
+                            "live transcript — read-only while running (Esc back to main)".into();
+                    }
+                    return;
                 }
                 self.show_subagent_detail(&run);
-                if running {
-                    self.status =
-                        "detail posted — watching live (Enter refreshes, Esc closes)".into();
-                } else {
-                    self.popup = Popup::None;
-                }
+                self.popup = Popup::None;
             }
             AgentRow::Task(t) => {
                 // Jump to the Tasks panel focused on this task.
@@ -366,6 +374,7 @@ impl App {
                     self.popup = Popup::None;
                     self.status = "already on this chat".into();
                 } else {
+                    self.return_session = None;
                     self.resume_chat(&sess.id);
                     self.popup = Popup::None;
                 }
@@ -637,6 +646,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn enter_running_linked_run_opens_readonly_transcript() {
+        // A running subagent opens its live transcript too — but user
+        // turns stay out until it finishes (both loops would append
+        // there and corrupt it).
+        let (_env, db) = agents_env("sublive");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store
+            .create_session("sub-sa_live1", "model-s", Some("live transcript"))
+            .unwrap();
+        store
+            .append_message("sub-sa_live1", "user", "live work xyz")
+            .unwrap();
+        let (id, _) = tracker::track_start("coder", &unique_prompt("live"), "eda");
+        tracker::set_run_session(&id, "sub-sa_live1");
+        let mut app = test_app();
+        app.session_id = "sess-main".into();
+        app.popup = Popup::Agents;
+        let rows = agent_rows(&app);
+        app.agent_cursor = rows
+            .iter()
+            .position(|r| matches!(r, AgentRow::Subagent(run) if run.id == id))
+            .expect("run listed");
+        app.anchor_agent_cursor();
+        app.agents_activate();
+        assert_eq!(app.session_id, "sub-sa_live1", "live transcript opened");
+        assert_eq!(app.popup, Popup::None, "dialog closes into the view");
+        assert!(app.status.contains("read-only"), "{}", app.status);
+        // Typing there is refused while the run is live...
+        app.start_turn("hijack attempt".into(), None, "user");
+        assert!(!app.busy, "no turn started");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("read-only")),
+            "refusal explained"
+        );
+        // ...and allowed once it finishes.
+        tracker::track_finish(&id, true, "all done");
+        app.start_turn("follow up".into(), None, "user");
+        assert!(app.busy, "turn starts after finish");
+        if let Some(h) = app.pending.take() {
+            h.abort();
+        }
+        app.busy = false;
+        let _ = tracker::take_completions();
+    }
+
+    #[tokio::test]
     async fn subagent_completion_wakes_idle_chat() {
         let _lock = completion_lock();
         // Stale undrained completions from sibling tests would wake first
@@ -733,8 +789,7 @@ mod tests {
                 .is_some_and(|m| m.content.contains(&prompt[..24])),
             "anchored subagent detail posted, not Live"
         );
-        assert_eq!(app.popup, Popup::Agents, "running keeps dialog open");
-        assert!(app.status.contains("watching live"), "{}", app.status);
+        assert_eq!(app.popup, Popup::None, "unlinked row posts and closes");
         tracker::track_finish(&id, true, "done");
         let _ = tracker::take_completions();
     }
@@ -810,6 +865,66 @@ mod tests {
             "no repeat announcements"
         );
         tracker::track_finish(&id, true, "done");
+        let _ = tracker::take_completions();
+    }
+
+    #[tokio::test]
+    async fn esc_returns_from_subview_to_main() {
+        use crossterm::event::KeyCode;
+        let (_env, db) = agents_env("escback");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store
+            .create_session("sess-home", "model-h", Some("Home"))
+            .unwrap();
+        store
+            .append_message("sess-home", "user", "home sweet home")
+            .unwrap();
+        store
+            .create_session("sub-sa_esc1", "model-s", Some("sub"))
+            .unwrap();
+        let mut app = test_app();
+        // Sitting in a subagent view with a way back...
+        app.session_id = "sub-sa_esc1".into();
+        app.return_session = Some("sess-home".into());
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert_eq!(app.session_id, "sess-home", "Esc returns to main");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("home sweet home")),
+            "main transcript restored"
+        );
+        // ...but Esc in a normal chat keeps its classic behavior.
+        app.input.text = "draft".into();
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(app.input.text.is_empty(), "Esc still clears input");
+        assert_eq!(app.session_id, "sess-home", "stays put");
+    }
+
+    #[tokio::test]
+    async fn locked_subview_hides_input_and_swallows_edits() {
+        use crossterm::event::KeyCode;
+        let _lock = completion_lock();
+        assert!(!test_app().viewing_locked_subagent(), "main chat editable");
+        let (id, _) = tracker::track_start("explore", &unique_prompt("lockview"), "eda");
+        tracker::set_run_session(&id, "sub-sa_lock1");
+        let mut app = test_app();
+        app.session_id = "sub-sa_lock1".into();
+        assert!(app.viewing_locked_subagent(), "running transcript locked");
+        // No textbox rendered...
+        let text = render_text(&mut app, 100, 30);
+        assert!(text.contains("read-only"), "read-only bar shown");
+        assert!(!text.contains("Enter send"), "no input chrome");
+        // ...and keystrokes never reach it.
+        app.handle_key(KeyCode::Char('x')).await.unwrap();
+        assert!(app.input.text.is_empty(), "char swallowed");
+        // Finished transcripts edit normally again.
+        tracker::track_finish(&id, true, "done");
+        assert!(!app.viewing_locked_subagent(), "unlocked after finish");
+        app.handle_key(KeyCode::Char('y')).await.unwrap();
+        assert_eq!(app.input.text, "y");
+        app.input.text.clear();
         let _ = tracker::take_completions();
     }
 }

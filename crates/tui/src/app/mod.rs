@@ -102,6 +102,9 @@ pub struct App {
     /// Boot time (unix secs): only runs started after this are announced
     /// as launches — hydrated history stays silent.
     pub(crate) booted_at: i64,
+    /// Session to return to with Esc from a subagent transcript view.
+    /// Set when /agents opens a linked run's session, consumed by Esc.
+    pub(crate) return_session: Option<String>,
     pub(crate) task_cursor: usize,
     pub(crate) error_cursor: usize,
     pub(crate) rewind_cursor: usize,
@@ -1486,6 +1489,7 @@ impl App {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
+            return_session: None,
             task_cursor: 0,
             error_cursor: 0,
             rewind_cursor: 0,

@@ -54,6 +54,13 @@ impl App {
                     };
                     return Ok(());
                 }
+                // Locked subagent view has no input box: swallow edits
+                // quietly (submit is refused too) instead of filling it
+                // invisibly.
+                if self.viewing_locked_subagent() {
+                    self.status = "read-only: subagent running (Esc back to main)".into();
+                    return Ok(());
+                }
                 self.input.insert(c);
                 self.input.completion_idx = 0;
             }
@@ -76,10 +83,16 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
+                if self.viewing_locked_subagent() {
+                    return Ok(());
+                }
                 self.input.backspace();
                 self.input.completion_idx = 0;
             }
             KeyCode::Delete => {
+                if self.viewing_locked_subagent() {
+                    return Ok(());
+                }
                 self.input.delete();
                 self.input.completion_idx = 0;
             }
@@ -136,6 +149,17 @@ impl App {
                 }
                 if self.selection.take().is_some() {
                     return Ok(());
+                }
+                // Esc from a subagent transcript returns to main chat.
+                if self
+                    .session_id
+                    .starts_with(vioraharness_core::subagent::tracker::SUB_SESSION_PREFIX)
+                {
+                    if let Some(prev) = self.return_session.clone() {
+                        self.return_session = None;
+                        self.resume_chat(&prev);
+                        return Ok(());
+                    }
                 }
                 if self.pending_image.is_some() || !self.pending_texts.is_empty() {
                     let chips: Vec<String> = self

@@ -174,6 +174,26 @@ impl App {
     }
 
     pub(crate) fn draw_input(&self, frame: &mut Frame, area: Rect) {
+        // Locked subagent view: no textbox at all (same area, no reflow) —
+        // typing is refused while the run is live, so show that instead.
+        if self.viewing_locked_subagent() {
+            let bar = Paragraph::new(Line::from(Span::styled(
+                "⑂ subagent running… transcript is read-only — Esc back to main chat",
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Subagent view ")
+                    .style(Theme::panel_bg())
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            )
+            .style(Theme::panel_bg());
+            frame.render_widget(bar, area);
+            return;
+        }
         let model_short = self.model.split('/').next_back().unwrap_or(&self.model);
         let level = Span::styled(
             self.thinking_level.clone(),

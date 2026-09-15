@@ -91,6 +91,25 @@ impl App {
         image: Option<(String, String)>,
         prompt_role: &'static str,
     ) {
+        // A running subagent owns its transcript session: user turns stay
+        // out until it finishes (both loops append there — interleaving
+        // would corrupt the transcript). System turns (task wakes) pass.
+        if prompt_role == "user"
+            && self
+                .session_id
+                .starts_with(vioraharness_core::subagent::tracker::SUB_SESSION_PREFIX)
+            && vioraharness_core::subagent::tracker::run_for_session(&self.session_id).is_some_and(
+                |r| r.status == vioraharness_core::subagent::tracker::SubagentStatus::Running,
+            )
+        {
+            self.messages.push(Msg::new(
+                "system",
+                "subagent still running — this view is read-only until it finishes (Esc back to main)".to_string(),
+            ));
+            self.status = "read-only: subagent running".into();
+            self.scroll = 0;
+            return;
+        }
         self.scroll = 0;
         self.selection = None;
         self.dragging = false;
