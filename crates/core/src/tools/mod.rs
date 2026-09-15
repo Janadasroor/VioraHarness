@@ -766,18 +766,44 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
                 .get("model")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
+            // Parent context injected by the loop (see loop/mod.rs): depth
+            // for tracker labels + recursion guard, model as offline
+            // fallback behind explicit `model:` and SUBAGENT_MODEL env.
+            let parent_depth = args
+                .get("parent_depth")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let parent_model = args
+                .get("parent_model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             if prompt.is_empty() {
                 return json!({"ok": false, "error": "missing prompt for task"});
             }
-            let kind = match kind_str {
-                "explore" => crate::subagent::SubagentKind::Explore,
-                "planner" => crate::subagent::SubagentKind::Planner,
-                "coder" => crate::subagent::SubagentKind::Coder,
-                "reviewer" => crate::subagent::SubagentKind::Reviewer,
-                _ => crate::subagent::SubagentKind::Explore,
+            let kind = match crate::subagent::SubagentKind::parse(kind_str) {
+                Ok(k) => k,
+                Err(e) => return json!({"ok": false, "error": format!("{e:#}")}),
             };
+            let parent = crate::subagent::pool::ParentCtx {
+                depth: parent_depth,
+                model: parent_model,
+            };
+            if args
+                .get("background")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                // Detached: the run id returns at once so the turn
+                // continues; completion surfaces via take_completions
+                // (TUI notice + follow-up turn, like bg bash tasks).
+                // Needs a live session to collect the result (TUI/serve).
+                let run_id = crate::subagent::SubagentPool::spawn_background_full(
+                    kind, prompt, model, parent,
+                );
+                return json!({"ok": true, "background": true, "run_id": run_id, "kind": kind_str});
+            }
             let pool = crate::subagent::SubagentPool::new(4);
-            match pool.spawn_one(kind, prompt, model).await {
+            match pool.spawn_one_full(kind, prompt, model, None, parent).await {
                 Ok(result) => json!({"ok": true, "result": result, "kind": kind_str}),
                 Err(e) => json!({"ok": false, "error": format!("{e:#}")}),
             }
@@ -994,6 +1020,14 @@ mod tests {
         assert_eq!(r["ok"], false);
         assert!(r["error"].as_str().unwrap().contains("unknown tool"), "{r}");
 
+        let r = execute_tool("task", json!({"prompt": "x", "kind": "explor"})).await;
+        assert_eq!(r["ok"], false, "typo'd kind must fail closed, {r}");
+        let err = r["error"].as_str().unwrap_or_default();
+        assert!(
+            err.contains("kind") || err.contains("schema"),
+            "error names the kind problem: {r}"
+        );
+
         let r = execute_tool("bash", json!({})).await;
         assert_eq!(r["ok"], false, "schema requires command");
 
@@ -1024,6 +1058,53 @@ mod tests {
                 .contains("missing required field 'path'"),
             "{r}"
         );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn task_background_returns_id_then_drains() {
+        use crate::subagent::tracker;
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_SUBAGENT_MODEL").ok();
+        std::env::set_var("VIORAHARNESS_SUBAGENT_MODEL", "test/bogus-model-xyz");
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let prompt = format!("bg-probe-{n}-{}", std::process::id());
+
+        let r = execute_tool(
+            "task",
+            json!({"prompt": prompt, "kind": "explore", "background": true}),
+        )
+        .await;
+        assert_eq!(r["ok"], true, "{r}");
+        assert_eq!(r["background"], true, "{r}");
+        let run_id = r["run_id"].as_str().unwrap_or_default().to_string();
+        assert!(!run_id.is_empty(), "{r}");
+        assert!(
+            tracker::active_runs().iter().any(|x| x.id == run_id),
+            "detached run is live at once"
+        );
+        // Finish deterministically: cancel wins the race against the
+        // bogus-model failure; either order must drain exactly once.
+        let _ = tracker::cancel_run(&run_id);
+        let start = std::time::Instant::now();
+        let mut drained = false;
+        while start.elapsed().as_secs() < 15 {
+            if tracker::take_completions().iter().any(|x| x.id == run_id) {
+                drained = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(drained, "completion surfaced");
+        assert!(
+            tracker::take_completions().iter().all(|x| x.id != run_id),
+            "drains once"
+        );
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_SUBAGENT_MODEL", v),
+            None => std::env::remove_var("VIORAHARNESS_SUBAGENT_MODEL"),
+        }
     }
 
     #[test]

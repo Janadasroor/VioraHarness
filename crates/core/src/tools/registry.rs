@@ -252,12 +252,13 @@ impl ToolRegistry {
         self.register("viora", "Generic viora wrapper: cmd string (e.g. \"schematic-diff a b --json\")", json!({
             "type":"object","properties":{"cmd":{"type":"string"},"timeout":{"type":"integer"}},"required":["cmd"]
         }));
-        self.register("task", "Spawn a subagent (explore/planner/coder) with isolated context and filtered tools. Use for parallel exploration or delegated work.", json!({
+        self.register("task", "Spawn a subagent (explore/planner/coder/reviewer) with isolated context and filtered tools. Use for parallel exploration or delegated work. background:true detaches it (run id returned at once, result arrives as a follow-up turn) so the turn continues; default false blocks until done.", json!({
             "type":"object",
             "properties":{
                 "prompt":{"type":"string","description":"Task prompt for subagent"},
                 "kind":{"type":"string","enum":["explore","planner","coder","reviewer"],"description":"Subagent kind — explore=read-only fast, planner=draft plan, coder=full"},
-                "model":{"type":"string","description":"Optional model override"}
+                "model":{"type":"string","description":"Optional model override"},
+                "background":{"type":"boolean","description":"Detach: return the run id at once, result follows later"}
             },
             "required":["prompt"]
         }));

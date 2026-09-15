@@ -118,6 +118,21 @@ impl AgentLoop {
             .await
     }
 
+    /// Subagent entry: same as `run` but at an explicit nesting depth so
+    /// the `task recursion depth exceeded` guard actually fires for nested
+    /// spawns (a fresh `run()` would reset to 0 and never trip it).
+    #[async_recursion::async_recursion]
+    pub async fn run_with_depth(
+        &self,
+        prompt: &str,
+        model: &str,
+        session_id: Option<String>,
+        depth: usize,
+    ) -> anyhow::Result<String> {
+        self.run_inner(prompt, model, session_id, depth, None, None, "user")
+            .await
+    }
+
     #[async_recursion::async_recursion]
     pub async fn run_streaming(
         &self,
@@ -734,7 +749,17 @@ impl AgentLoop {
                         obj.entry("tool_call_id")
                             .or_insert(Value::String(id.clone()));
                         if name == "task" {
-                            obj.entry("model")
+                            // Parent context for the subagent pool: explicit
+                            // depth (the pool labels child_depth =
+                            // parent+1 and runs the loop at that depth so
+                            // the recursion guard fires) and parent model
+                            // (offline fallback — the pool prefers an
+                            // explicit `model:` override and
+                            // VIORAHARNESS_SUBAGENT_MODEL first).
+                            // `model` from the LLM stays the override.
+                            obj.entry("parent_depth".to_string())
+                                .or_insert(json!(depth));
+                            obj.entry("parent_model".to_string())
                                 .or_insert(Value::String(model.to_string()));
                         }
                     }

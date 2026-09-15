@@ -221,6 +221,9 @@ impl SessionStore {
             );
             CREATE INDEX IF NOT EXISTS idx_todos_session ON todos(session_id);",
         );
+        // Subagent run history (tracker write-through; hydrated on read so
+        // /agents survives restarts). Same DDL as the tracker's ensure.
+        let _ = conn.execute_batch(crate::subagent::tracker::SUBAGENT_TABLE_SQL);
         Ok(())
     }
 
@@ -295,6 +298,18 @@ pub fn project_hash_for_cwd(cwd: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migrate_creates_subagent_runs_table() {
+        let s = mem_store();
+        let count: i64 = s
+            .pool
+            .get()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM subagent_runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "tracker table migrates with the store");
+    }
 
     #[test]
     fn restore_latest_resolves_session_cwd() {
