@@ -927,7 +927,7 @@ impl App {
                 if total > visible {
                     visible = inner_h.saturating_sub(6).max(3);
                 }
-                let cursor = self.agent_cursor.min(total.saturating_sub(1));
+                let cursor = self.agent_highlight_index(&rows);
                 let mut start = 0;
                 if total > visible {
                     if cursor >= visible {

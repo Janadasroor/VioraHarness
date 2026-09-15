@@ -255,6 +255,7 @@ impl App {
             "/agents" | "/agent" => {
                 self.agent_cursor = 0;
                 self.popup = Popup::Agents;
+                self.anchor_agent_cursor();
             }
             "/errors" | "/error" | "/err" => {
                 self.error_cursor = 0;

@@ -3,8 +3,14 @@
 //! Rows are flat (one cursor across sections, like the Tasks panel):
 //! the live turn first, then subagent runs (active first), then
 //! background tasks (running first), then recent chats. Enter acts
-//! contextually: live closes, subagent posts its detail to chat, task
-//! jumps to the Tasks panel focused on it, chat resumes it.
+//! contextually: live closes, a finished subagent opens its linked
+//! transcript session (its own view), a running one posts its detail and
+//! keeps the dialog open live, task jumps to the Tasks panel focused on
+//! it, chat resumes it.
+//! Selection is id-anchored (`AgentRow::row_id`): the list re-sorts on
+//! every rebuild, so a bare index could land on another row by Enter
+//! time. Main chat also announces each launch with its title
+//! (`poll_subagent_starts`, every event-loop tick).
 
 use super::*;
 use vioraharness_core::session::store::StoredSession;
@@ -17,6 +23,21 @@ pub(crate) enum AgentRow {
     Subagent(SubagentRun),
     Task(BgTask),
     Chat(StoredSession),
+}
+
+impl AgentRow {
+    /// Stable identity surviving list rebuilds. The dialog re-sorts on
+    /// every keypress (active-first), so a bare index can silently point
+    /// at another row by Enter time — usually Live, which reads as "the
+    /// subagent opened the main agent". Anchor by id instead.
+    pub(crate) fn row_id(&self) -> String {
+        match self {
+            AgentRow::Live => "live".to_string(),
+            AgentRow::Subagent(run) => format!("sa:{}", run.id),
+            AgentRow::Task(t) => format!("task:{}", t.id),
+            AgentRow::Chat(s) => format!("chat:{}", s.id),
+        }
+    }
 }
 
 /// Flattened selectable rows: live turn, subagents (active first),
@@ -228,10 +249,86 @@ impl App {
         self.scroll = 0;
     }
 
-    /// Enter on the highlighted Agents row: contextual navigation.
-    pub(crate) fn agents_activate(&mut self) {
+    /// Re-anchor the cursor id to the current index after any move.
+    /// Moves are relative (±1/page) so the index is right at move time;
+    /// the id is what keeps Enter honest when the list re-sorts later.
+    pub(crate) fn anchor_agent_cursor(&mut self) {
         let rows = agent_rows(self);
-        let Some(row) = rows.get(self.agent_cursor).cloned() else {
+        if rows.is_empty() {
+            self.agent_cursor_id = None;
+            return;
+        }
+        self.agent_cursor = self.agent_cursor.min(rows.len() - 1);
+        self.agent_cursor_id = rows.get(self.agent_cursor).map(|r| r.row_id());
+    }
+
+    /// Resolve the highlighted row: prefer the anchored id against fresh
+    /// rows, fall back to the clamped index when the row is gone
+    /// (eviction/prune) or was never anchored (older flows, tests).
+    pub(crate) fn resolve_agent_row(&mut self) -> Option<AgentRow> {
+        let rows = agent_rows(self);
+        if rows.is_empty() {
+            return None;
+        }
+        if let Some(want) = self.agent_cursor_id.clone() {
+            if let Some(pos) = rows.iter().position(|r| r.row_id() == want) {
+                self.agent_cursor = pos;
+                return rows.into_iter().nth(pos);
+            }
+        }
+        self.agent_cursor = self.agent_cursor.min(rows.len() - 1);
+        self.agent_cursor_id = rows.get(self.agent_cursor).map(|r| r.row_id());
+        rows.into_iter().nth(self.agent_cursor)
+    }
+
+    /// Read-only highlight index for render: same id-first resolution
+    /// without mutating (render takes `&self`).
+    pub(crate) fn agent_highlight_index(&self, rows: &[AgentRow]) -> usize {
+        if rows.is_empty() {
+            return 0;
+        }
+        if let Some(want) = self.agent_cursor_id.as_deref() {
+            if let Some(pos) = rows.iter().position(|r| r.row_id() == want) {
+                return pos;
+            }
+        }
+        self.agent_cursor.min(rows.len() - 1)
+    }
+
+    /// Announce newly-launched subagents in main chat with their title
+    /// (prompt preview), so a spawn is visible without opening /agents.
+    /// Runs every event-loop iteration. History hydrated from sqlite is
+    /// never announced: only runs started after boot qualify, and each
+    /// id announces once.
+    pub(crate) fn poll_subagent_starts(&mut self) {
+        for run in tracker::list_runs() {
+            if run.started_at < self.booted_at {
+                continue;
+            }
+            if self.seen_subagents.insert(run.id.clone()) {
+                let title: String = run.prompt_preview.chars().take(100).collect();
+                self.messages.push(Msg::new(
+                    "system",
+                    format!(
+                        "⑂ subagent {} {} launched — {title} (/agents to watch)",
+                        run.kind,
+                        short_task_id(&run.id),
+                    ),
+                ));
+            }
+        }
+    }
+
+    /// Enter on the highlighted Agents row: contextual navigation.
+    /// Id-anchored (see `resolve_agent_row`): entering a subagent can
+    /// never land on Live just because the list re-sorted. A finished
+    /// subagent opens its linked transcript session — the subagent's own
+    /// view, not a summary in main chat. A running one keeps the dialog
+    /// open so its status stays visible live — Enter again refreshes its
+    /// detail, Esc closes. Rows from before the session link fall back to
+    /// the detail post.
+    pub(crate) fn agents_activate(&mut self) {
+        let Some(row) = self.resolve_agent_row() else {
             return;
         };
         match row {
@@ -240,8 +337,21 @@ impl App {
                 self.status = "already here — this is the live turn".into();
             }
             AgentRow::Subagent(run) => {
+                let running = run.status == tracker::SubagentStatus::Running;
+                if !running {
+                    if let Some(sid) = run.session_id.clone() {
+                        self.resume_chat(&sid);
+                        self.popup = Popup::None;
+                        return;
+                    }
+                }
                 self.show_subagent_detail(&run);
-                self.popup = Popup::None;
+                if running {
+                    self.status =
+                        "detail posted — watching live (Enter refreshes, Esc closes)".into();
+                } else {
+                    self.popup = Popup::None;
+                }
             }
             AgentRow::Task(t) => {
                 // Jump to the Tasks panel focused on this task.
@@ -264,10 +374,9 @@ impl App {
     }
 
     /// `x` on the highlighted row: kill a running background task or
-    /// detached subagent.
+    /// detached subagent. Id-anchored like activation.
     pub(crate) fn agents_kill(&mut self) {
-        let rows = agent_rows(self);
-        match rows.get(self.agent_cursor) {
+        match self.resolve_agent_row() {
             Some(AgentRow::Task(t)) => {
                 if tasks::kill_task(&t.id) {
                     self.status = format!("killed {}", short_task_id(&t.id));
@@ -395,6 +504,7 @@ mod tests {
         // Index 0 is structurally Live (never shifts): activate closes.
         app.popup = Popup::Agents;
         app.agent_cursor = 0;
+        app.anchor_agent_cursor();
         app.agents_activate();
         assert_eq!(app.popup, Popup::None);
         tracker::track_finish(&id, true, "done");
@@ -421,6 +531,7 @@ mod tests {
                 continue;
             };
             app.agent_cursor = pos;
+            app.anchor_agent_cursor();
             app.agents_activate();
             if app
                 .messages
@@ -458,6 +569,7 @@ mod tests {
                 continue;
             };
             app.agent_cursor = pos;
+            app.anchor_agent_cursor();
             app.agents_activate();
             if app.popup != Popup::Tasks {
                 continue;
@@ -474,6 +586,7 @@ mod tests {
         // x on a non-task row hints instead of killing.
         app.popup = Popup::Agents;
         app.agent_cursor = 0;
+        app.anchor_agent_cursor();
         app.agents_kill();
         assert!(app.status.contains("x only kills"), "{}", app.status);
     }
@@ -504,6 +617,7 @@ mod tests {
                 continue;
             };
             app.agent_cursor = pos;
+            app.anchor_agent_cursor();
             app.session_id = "sess-ag-a".into();
             app.popup = Popup::Agents;
             app.agents_activate();
@@ -587,7 +701,115 @@ mod tests {
             .iter()
             .position(|r| matches!(r, AgentRow::Subagent(run) if run.id == id))
             .expect("finished run listed");
+        app.anchor_agent_cursor();
         app.agents_kill();
         assert!(app.status.contains("not running"), "{}", app.status);
+    }
+
+    #[test]
+    fn enter_hits_anchored_row_after_resort() {
+        // Regression: the cursor is a bare index into a list that re-sorts
+        // (active-first) on every rebuild. A stale index used to land on
+        // Live — "the subagent opened the main agent". Id-anchoring must
+        // survive the resort.
+        let _lock = completion_lock();
+        let prompt = unique_prompt("anchored");
+        let (id, _) = tracker::track_start("explore", &prompt, "eda");
+        let mut app = test_app();
+        app.popup = Popup::Agents;
+        let rows = agent_rows(&app);
+        app.agent_cursor = rows
+            .iter()
+            .position(|r| matches!(r, AgentRow::Subagent(run) if run.id == id))
+            .expect("run listed");
+        app.anchor_agent_cursor();
+        // Simulate the resort happening between render and Enter: the
+        // subagent is no longer at index 1, cursor clobbered to Live.
+        app.agent_cursor = 0;
+        app.agents_activate();
+        assert!(
+            app.messages
+                .last()
+                .is_some_and(|m| m.content.contains(&prompt[..24])),
+            "anchored subagent detail posted, not Live"
+        );
+        assert_eq!(app.popup, Popup::Agents, "running keeps dialog open");
+        assert!(app.status.contains("watching live"), "{}", app.status);
+        tracker::track_finish(&id, true, "done");
+        let _ = tracker::take_completions();
+    }
+
+    #[test]
+    fn enter_finished_linked_run_opens_its_session() {
+        // The subagent's own view: Enter on a finished linked run resumes
+        // its transcript session instead of posting a summary in main chat.
+        let (_env, db) = agents_env("subview");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store
+            .create_session("sub-sa_view1", "model-s", Some("sub transcript"))
+            .unwrap();
+        store
+            .append_message("sub-sa_view1", "user", "sub hello xyz")
+            .unwrap();
+        let (id, _) = tracker::track_start("explore", &unique_prompt("view"), "eda");
+        tracker::set_run_session(&id, "sub-sa_view1");
+        tracker::track_finish(&id, true, "all done");
+        let _ = tracker::take_completions();
+        let mut app = test_app();
+        app.session_id = "sess-main".into();
+        app.popup = Popup::Agents;
+        let rows = agent_rows(&app);
+        app.agent_cursor = rows
+            .iter()
+            .position(|r| matches!(r, AgentRow::Subagent(run) if run.id == id))
+            .expect("run listed");
+        app.anchor_agent_cursor();
+        app.agents_activate();
+        assert_eq!(app.session_id, "sub-sa_view1", "switched to transcript");
+        assert_eq!(app.popup, Popup::None);
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("sub hello xyz")),
+            "transcript loaded, not a summary"
+        );
+    }
+
+    #[test]
+    fn launch_notice_posts_title_once() {
+        let _lock = completion_lock();
+        let prompt = unique_prompt("launched-title-xyz");
+        let mut app = test_app();
+        // Pre-boot history (hydrated from sqlite) must stay silent.
+        app.booted_at = i64::MAX;
+        let (id, _) = tracker::track_start("explore", &prompt, "eda");
+        app.poll_subagent_starts();
+        assert!(
+            !app.messages.iter().any(|m| m.content.contains(&prompt)),
+            "pre-boot run stays silent"
+        );
+        // A genuinely new launch announces kind + title, exactly once.
+        app.booted_at = 0;
+        app.poll_subagent_starts();
+        let hits: Vec<_> = app
+            .messages
+            .iter()
+            .filter(|m| m.content.contains(&prompt))
+            .collect();
+        assert_eq!(hits.len(), 1, "launch announced once");
+        assert!(hits[0].content.contains("explore"), "{}", hits[0].content);
+        assert!(hits[0].content.contains("launched"), "{}", hits[0].content);
+        app.poll_subagent_starts();
+        assert_eq!(
+            app.messages
+                .iter()
+                .filter(|m| m.content.contains(&prompt))
+                .count(),
+            1,
+            "no repeat announcements"
+        );
+        tracker::track_finish(&id, true, "done");
+        let _ = tracker::take_completions();
     }
 }

@@ -93,6 +93,15 @@ pub struct App {
 
     pub(crate) session_cursor: usize,
     pub(crate) agent_cursor: usize,
+    /// Stable id of the highlighted /agents row (see `AgentRow::row_id`).
+    /// The dialog re-sorts on every keypress, so Enter/kill resolve by
+    /// this instead of the bare index.
+    pub(crate) agent_cursor_id: Option<String>,
+    /// Subagent ids already announced in main chat (`poll_subagent_starts`).
+    pub(crate) seen_subagents: std::collections::HashSet<String>,
+    /// Boot time (unix secs): only runs started after this are announced
+    /// as launches — hydrated history stays silent.
+    pub(crate) booted_at: i64,
     pub(crate) task_cursor: usize,
     pub(crate) error_cursor: usize,
     pub(crate) rewind_cursor: usize,
@@ -1471,6 +1480,12 @@ impl App {
             settings_cursor: 0,
             session_cursor: 0,
             agent_cursor: 0,
+            agent_cursor_id: None,
+            seen_subagents: std::collections::HashSet::new(),
+            booted_at: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0),
             task_cursor: 0,
             error_cursor: 0,
             rewind_cursor: 0,
@@ -1660,6 +1675,7 @@ impl App {
 
             self.poll_task_completions();
             self.poll_subagent_completions();
+            self.poll_subagent_starts();
 
             if let Some(rx) = &mut self.perm_rx {
                 match rx.try_recv() {

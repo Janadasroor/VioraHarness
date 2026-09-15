@@ -549,6 +549,7 @@ impl App {
                 }
                 let cur = self.agent_cursor as i32 + dir;
                 self.agent_cursor = cur.clamp(0, len as i32 - 1) as usize;
+                self.anchor_agent_cursor();
             }
             Popup::ToolOutput => {
                 if dir < 0 {

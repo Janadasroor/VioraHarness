@@ -272,6 +272,7 @@ impl App {
                     } else if len > 0 {
                         self.agent_cursor = len.saturating_sub(1);
                     }
+                    self.anchor_agent_cursor();
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     let len = super::agents::agent_rows(self).len();
@@ -280,10 +281,12 @@ impl App {
                     } else {
                         self.agent_cursor = 0;
                     }
+                    self.anchor_agent_cursor();
                 }
                 KeyCode::PageUp => {
                     let page = popup_list_visible(6);
                     self.agent_cursor = self.agent_cursor.saturating_sub(page);
+                    self.anchor_agent_cursor();
                 }
                 KeyCode::PageDown => {
                     let len = super::agents::agent_rows(self).len();
@@ -291,15 +294,18 @@ impl App {
                     if len > 0 {
                         self.agent_cursor = (self.agent_cursor + page).min(len - 1);
                     }
+                    self.anchor_agent_cursor();
                 }
                 KeyCode::Home => {
                     self.agent_cursor = 0;
+                    self.anchor_agent_cursor();
                 }
                 KeyCode::End => {
                     let len = super::agents::agent_rows(self).len();
                     if len > 0 {
                         self.agent_cursor = len - 1;
                     }
+                    self.anchor_agent_cursor();
                 }
                 KeyCode::Enter => {
                     self.agents_activate();
