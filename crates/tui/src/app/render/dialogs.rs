@@ -27,6 +27,7 @@ impl App {
                 Popup::ToolOutput => " Tool Output — Full ",
                 Popup::Skills => " Skills — auto-loaded on intent ",
                 Popup::Tasks => " Background Tasks ",
+                Popup::Agents => " Agents — live, subagents, tasks, chats ",
                 Popup::Errors => " Errors ",
                 Popup::Rewind => " Rewind — restore checkpoint ",
                 Popup::Settings => " Settings ",
@@ -68,13 +69,14 @@ impl App {
                 Line::from("  /model <name>  switch model (e.g. provider/model-id from /model picker)"),
                 Line::from("  /mode [name]   switch agent mode — picker when bare (eda|web|android)"),
                 Line::from("  /theme [name]  switch theme (tokyonight[-soft]/eye-comfort/warm-dark/catppuccin/dracula/gruvbox/nord/system)"),
-                Line::from("  /settings    open settings — theme, mode, model, thinking, cards, tasks, compaction"),
+                Line::from("  /settings    open settings — theme, mode, model, thinking, cards, tasks, compaction, notifications"),
                 Line::from("  /thinking on/off/<level>  reasoning display + depth (off|minimal|low|medium|high|xhigh|max, Ctrl+T cycles)"),
                 Line::from("  /undo      undo last file snapshot"),
                 Line::from("  /rewind    restore checkpoints at any message (dialog)"),
                 Line::from("  /compact   summarize + squash history (auto at 80%)"),
                 Line::from("  /output    view last tool output (bash very long, F9)"),
                 Line::from("  /tasks     background tasks — list, logs, kill (bash background:true)"),
+                Line::from("  /agents    live agents — turn, subagents, tasks, chats (navigate)"),
                 Line::from("  /errors    error log — list, full text, clear"),
                 Line::from("  /skills    list skills • /skill-new [--local] <what it should do> (AI writes it)"),
                 Line::from("  /quit /q /exit  quit"),
@@ -884,6 +886,176 @@ impl App {
                 }
                 lines
             }
+            Popup::Agents => {
+                use super::super::agents::{age_str, agent_rows, AgentRow};
+                use vioraharness_core::subagent::tracker::SubagentStatus;
+                use vioraharness_core::tools::tasks::BgStatus;
+                let rows = agent_rows(self);
+                let total = rows.len();
+                let now =
+                    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+                let sub_active = rows
+                    .iter()
+                    .filter(|r| {
+                        matches!(r, AgentRow::Subagent(run) if run.status == SubagentStatus::Running)
+                    })
+                    .count();
+                let sub_total = rows
+                    .iter()
+                    .filter(|r| matches!(r, AgentRow::Subagent(_)))
+                    .count();
+                let task_running = rows
+                    .iter()
+                    .filter(|r| matches!(r, AgentRow::Task(t) if t.status == BgStatus::Running))
+                    .count();
+                let task_total = rows
+                    .iter()
+                    .filter(|r| matches!(r, AgentRow::Task(_)))
+                    .count();
+                let chat_total = rows
+                    .iter()
+                    .filter(|r| matches!(r, AgentRow::Chat(_)))
+                    .count();
+                let live_state = if self.busy { "busy" } else { "ready" };
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(vec![Span::styled(
+                    format!(" ▶ live ({live_state}) • {sub_active}/{sub_total} subagents • {task_running}/{task_total} tasks • {chat_total} chats "),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                )]));
+                let inner_h = inner.height as usize;
+                let mut visible = inner_h.saturating_sub(5).max(3);
+                if total > visible {
+                    visible = inner_h.saturating_sub(6).max(3);
+                }
+                let cursor = self.agent_cursor.min(total.saturating_sub(1));
+                let mut start = 0;
+                if total > visible {
+                    if cursor >= visible {
+                        start = cursor + 1 - visible;
+                    }
+                    if start + visible > total {
+                        start = total - visible;
+                    }
+                }
+                let end = (start + visible).min(total);
+                let w = inner.width as usize;
+                for (idx, row) in rows[start..end].iter().enumerate() {
+                    let i = start + idx;
+                    let is_selected = i == cursor;
+                    let style = if is_selected {
+                        Theme::selection()
+                    } else {
+                        Style::default()
+                    };
+                    let star = if is_selected { "▶ " } else { "  " };
+                    let line = match row {
+                        AgentRow::Live => {
+                            let label = self
+                                .session_title
+                                .as_deref()
+                                .filter(|t| !t.trim().is_empty())
+                                .unwrap_or("(untitled)");
+                            let model_short =
+                                self.model.split('/').next_back().unwrap_or(&self.model);
+                            let mut state = live_state.to_string();
+                            if self.busy {
+                                if let Some((_, name, _, since)) = &self.running_tool {
+                                    let el = since.elapsed().as_secs();
+                                    state = format!("running {name} {el}s");
+                                } else {
+                                    state = "thinking…".into();
+                                }
+                            }
+                            let mut extra = String::new();
+                            if !self.queued_prompts.is_empty() {
+                                extra.push_str(&format!(" · ⏳{}", self.queued_prompts.len()));
+                            }
+                            if self.pending_perm.is_some() || self.pending_q.is_some() {
+                                extra.push_str(" · ⚠ input needed");
+                            }
+                            let text = format!(
+                                "live · {} · {} · {}{} · {}",
+                                truncate_to_width(label, 28),
+                                truncate_to_width(model_short, 24),
+                                self.agent_mode,
+                                extra,
+                                state,
+                            );
+                            agents_line(star, "▶", Color::Green, &text, w, is_selected, style)
+                        }
+                        AgentRow::Subagent(run) => {
+                            let (icon, col) = match run.status {
+                                SubagentStatus::Running => ("◐", Color::Yellow),
+                                SubagentStatus::Done => ("●", Color::Green),
+                                SubagentStatus::Error => ("✖", Color::Red),
+                                SubagentStatus::Killed => ("○", Color::DarkGray),
+                            };
+                            let text = format!(
+                                "sub · {} · d{} · {} · {} · {}",
+                                run.kind,
+                                run.depth,
+                                run.mode,
+                                age_str(run.elapsed_secs(now)),
+                                truncate_to_width(&run.prompt_preview, 44),
+                            );
+                            agents_line(star, icon, col, &text, w, is_selected, style)
+                        }
+                        AgentRow::Task(t) => {
+                            let (icon, col) = match t.status {
+                                BgStatus::Running => ("◐", Color::Yellow),
+                                BgStatus::Done => ("●", Color::Green),
+                                BgStatus::Error => ("✖", Color::Red),
+                                BgStatus::Killed => ("○", Color::DarkGray),
+                            };
+                            let cmd_raw =
+                                t.command.split_whitespace().collect::<Vec<_>>().join(" ");
+                            let text = format!(
+                                "task {} · {} · {} · {} · {}",
+                                short_task_id(&t.id),
+                                t.status.as_str(),
+                                t.mode,
+                                truncate_to_width(&cmd_raw, 34),
+                                age_str(now.saturating_sub(t.started_at)),
+                            );
+                            agents_line(star, icon, col, &text, w, is_selected, style)
+                        }
+                        AgentRow::Chat(sess) => {
+                            let marker = if sess.id == self.session_id {
+                                ("●", Color::Green)
+                            } else {
+                                ("○", Color::DarkGray)
+                            };
+                            let title = sess
+                                .title
+                                .as_deref()
+                                .filter(|t| !t.trim().is_empty())
+                                .unwrap_or("(untitled)");
+                            let model_short =
+                                sess.model.split('/').next_back().unwrap_or(&sess.model);
+                            let text = format!(
+                                "chat · {} · {} · {}",
+                                truncate_to_width(title, 30),
+                                truncate_to_width(model_short, 22),
+                                &sess.id[..8.min(sess.id.len())],
+                            );
+                            agents_line(star, marker.0, marker.1, &text, w, is_selected, style)
+                        }
+                    };
+                    lines.push(line);
+                }
+                if total > visible {
+                    lines.push(Line::from(Span::styled(
+                        format!(" — {}/{} agents (showing {}-{})", end, total, start + 1, end),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    " ↑/↓ navigate • Enter open • x kill task • Esc close ",
+                    Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                )));
+                lines
+            }
             Popup::Errors => {
                 use vioraharness_core::observe::list_errors;
                 let all = list_errors();
@@ -1208,4 +1380,46 @@ impl App {
             .style(Style::default().fg(Color::White));
         frame.render_widget(para, inner);
     }
+}
+
+/// Truncate display text to `max` chars with an ellipsis.
+fn truncate_to_width(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        format!(
+            "{}…",
+            s.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
+    }
+}
+
+/// One Agents-dialog row: selection marker + status icon + text.
+/// The text span takes the selection style when highlighted.
+fn agents_line(
+    star: &str,
+    icon: &str,
+    col: Color,
+    text: &str,
+    width: usize,
+    selected: bool,
+    sel: Style,
+) -> Line<'static> {
+    let cap = width.saturating_sub(10).max(20);
+    let text = truncate_to_width(text, cap);
+    Line::from(vec![
+        Span::raw(star.to_string()),
+        Span::styled(
+            format!("{icon} "),
+            Style::default().fg(col).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            text,
+            if selected {
+                sel
+            } else {
+                Style::default().fg(Color::White)
+            },
+        ),
+    ])
 }

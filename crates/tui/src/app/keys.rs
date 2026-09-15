@@ -218,6 +218,7 @@ impl App {
 
                             if !self.busy || Self::is_busy_safe_slash(&self.input.text) {
                                 let new_prompt = self.input.text.trim().to_string();
+                                self.input.push_history(new_prompt.clone());
                                 self.handle_slash(&new_prompt);
                                 self.input.text.clear();
                                 self.input.cursor = 0;
@@ -265,6 +266,7 @@ impl App {
                         // Deferred: runs in order once the turn finishes,
                         // exactly as if typed while idle.
                         let base = prompt.split_whitespace().next().unwrap_or("").to_string();
+                        self.input.push_history(prompt.clone());
                         self.queued_prompts.push(QueuedPrompt {
                             session_id: self.session_id.clone(),
                             send: prompt,
@@ -282,6 +284,7 @@ impl App {
                         };
                         return Ok(());
                     }
+                    self.input.push_history(prompt.clone());
                     self.handle_slash(&prompt);
                     self.input.text.clear();
                     self.input.cursor = 0;
@@ -538,6 +541,14 @@ impl App {
                 }
                 let cur = self.session_cursor as i32 + dir;
                 self.session_cursor = cur.clamp(0, len as i32 - 1) as usize;
+            }
+            Popup::Agents => {
+                let len = super::agents::agent_rows(self).len();
+                if len == 0 {
+                    return;
+                }
+                let cur = self.agent_cursor as i32 + dir;
+                self.agent_cursor = cur.clamp(0, len as i32 - 1) as usize;
             }
             Popup::ToolOutput => {
                 if dir < 0 {
@@ -827,5 +838,55 @@ mod tests {
         assert_eq!(app.input_col_to_idx(2), 1, "after 'a'");
         assert_eq!(app.input_col_to_idx(3), 4, "wide char occupies two columns");
         assert_eq!(app.input_col_to_idx(200), 5, "clamped to end");
+    }
+
+    #[test]
+    fn test_app_is_memory_only() {
+        let app = test_app();
+        assert!(!app.input.persist, "unit tests never touch disk history");
+        assert!(
+            app.input.history.is_empty(),
+            "no user history leaks into tests"
+        );
+        assert!(app.input.history_file.is_none());
+    }
+
+    #[tokio::test]
+    async fn slash_enter_records_history() {
+        let mut app = test_app();
+        app.input.text = "/model".into();
+        app.input.cursor = 6;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert_eq!(
+            app.input.history.last().map(String::as_str),
+            Some("/model"),
+            "slash kept for arrow-up: {:?}",
+            app.input.history
+        );
+    }
+
+    #[tokio::test]
+    async fn deferred_slash_records_history_once() {
+        let mut app = test_app();
+        app.busy = true;
+        app.input.text = "/new".into();
+        app.input.cursor = 4;
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert_eq!(app.queued_prompts.len(), 1);
+        assert_eq!(
+            app.input.history.iter().filter(|h| *h == "/new").count(),
+            1,
+            "queued once: {:?}",
+            app.input.history
+        );
+        // Draining a deferred slash must not push it a second time.
+        app.busy = false;
+        app.drain_queue();
+        assert_eq!(
+            app.input.history.iter().filter(|h| *h == "/new").count(),
+            1,
+            "no double on drain: {:?}",
+            app.input.history
+        );
     }
 }

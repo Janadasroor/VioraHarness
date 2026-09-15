@@ -264,6 +264,54 @@ impl App {
                 }
                 _ => {}
             },
+            Popup::Agents => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => {
+                    let len = super::agents::agent_rows(self).len();
+                    if self.agent_cursor > 0 {
+                        self.agent_cursor -= 1;
+                    } else if len > 0 {
+                        self.agent_cursor = len.saturating_sub(1);
+                    }
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    let len = super::agents::agent_rows(self).len();
+                    if len > 0 && self.agent_cursor + 1 < len {
+                        self.agent_cursor += 1;
+                    } else {
+                        self.agent_cursor = 0;
+                    }
+                }
+                KeyCode::PageUp => {
+                    let page = popup_list_visible(6);
+                    self.agent_cursor = self.agent_cursor.saturating_sub(page);
+                }
+                KeyCode::PageDown => {
+                    let len = super::agents::agent_rows(self).len();
+                    let page = popup_list_visible(6);
+                    if len > 0 {
+                        self.agent_cursor = (self.agent_cursor + page).min(len - 1);
+                    }
+                }
+                KeyCode::Home => {
+                    self.agent_cursor = 0;
+                }
+                KeyCode::End => {
+                    let len = super::agents::agent_rows(self).len();
+                    if len > 0 {
+                        self.agent_cursor = len - 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    self.agents_activate();
+                }
+                KeyCode::Char('x') | KeyCode::Char('X') => {
+                    self.agents_kill();
+                }
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => {
+                    self.popup = Popup::None;
+                }
+                _ => {}
+            },
             Popup::Errors => match key.code {
                 KeyCode::Up => {
                     let len = vioraharness_core::observe::list_errors().len();

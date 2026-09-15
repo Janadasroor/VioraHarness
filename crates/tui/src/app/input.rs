@@ -9,6 +9,12 @@ pub struct InputState {
     /// Persist history across restarts. False in tests so the suite never
     /// touches the real history file.
     pub(crate) persist: bool,
+    /// When Some, history is loaded from / saved to this file instead of
+    /// the global [`Self::history_path`]. Tests use a temp file here so
+    /// `cargo test` can never clobber the user's real prompt history
+    /// (env vars are process-global and test binaries run in parallel,
+    /// so the old `VIORAHARNESS_HISTORY` swap raced across processes).
+    pub(crate) history_file: Option<std::path::PathBuf>,
     /// Keyboard/mouse text selection anchor (byte index). The selection
     /// spans anchor..cursor; None means no selection.
     pub(crate) sel_anchor: Option<usize>,
@@ -198,7 +204,23 @@ impl InputState {
         }
         self.hist_idx = None;
         if self.persist {
-            Self::save_history(&self.history);
+            let target = self.history_file.clone().unwrap_or_else(Self::history_path);
+            Self::save_history_to(&target, &self.history);
+        }
+    }
+
+    /// Drop the last history entry when it equals `expected` (used to
+    /// discard a generated mega-prompt in favour of the slash the user
+    /// actually typed). Re-saves when persisting so the dropped entry
+    /// does not survive a restart.
+    pub(crate) fn drop_last_history_if(&mut self, expected: &str) {
+        if self.history.last().is_some_and(|last| last == expected) {
+            self.history.pop();
+            self.hist_idx = None;
+            if self.persist {
+                let target = self.history_file.clone().unwrap_or_else(Self::history_path);
+                Self::save_history_to(&target, &self.history);
+            }
         }
     }
 
@@ -208,6 +230,19 @@ impl InputState {
         Self {
             history: Self::load_history(),
             persist: true,
+            history_file: Some(Self::history_path()),
+            ..Self::default()
+        }
+    }
+
+    /// Test constructor: isolated temp file, never the real history.
+    /// No env vars, so parallel test binaries cannot race each other.
+    #[cfg(test)]
+    pub(crate) fn with_history_file(path: std::path::PathBuf) -> Self {
+        Self {
+            history: Self::load_history_from(&path),
+            persist: true,
+            history_file: Some(path),
             ..Self::default()
         }
     }
@@ -228,7 +263,11 @@ impl InputState {
     }
 
     pub(crate) fn load_history() -> Vec<String> {
-        let mut hist: Vec<String> = std::fs::read_to_string(Self::history_path())
+        Self::load_history_from(&Self::history_path())
+    }
+
+    pub(crate) fn load_history_from(path: &std::path::Path) -> Vec<String> {
+        let mut hist: Vec<String> = std::fs::read_to_string(path)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or_default();
@@ -238,12 +277,11 @@ impl InputState {
         hist
     }
 
-    fn save_history(hist: &[String]) {
-        let p = Self::history_path();
-        if let Some(parent) = p.parent() {
+    fn save_history_to(path: &std::path::Path, hist: &[String]) {
+        if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::write(p, serde_json::to_string(hist).unwrap_or_default());
+        let _ = std::fs::write(path, serde_json::to_string(hist).unwrap_or_default());
     }
     pub(crate) fn hist_prev(&mut self) {
         self.sel_anchor = None;
@@ -312,7 +350,7 @@ impl InputState {
             ),
             (
                 "/settings",
-                "open settings — theme, mode, model, thinking, cards, tasks, compaction",
+                "open settings — theme, mode, model, thinking, cards, tasks, compaction, notifications",
             ),
             (
                 "/thinking",
@@ -336,6 +374,7 @@ impl InputState {
             ("/exit", "alias for /quit"),
             ("/permissions", "show permissions"),
             ("/tasks", "background tasks — list, logs, kill"),
+            ("/agents", "live agents — turn, subagents, tasks, chats"),
             ("/errors", "error log — list, full text, clear"),
             ("/perms", "alias for /permissions"),
             ("/diff", "show last diff"),
@@ -395,74 +434,64 @@ mod tests {
         input
     }
 
-    fn temp_history(
-        tag: &str,
-    ) -> (
-        std::path::PathBuf,
-        Option<String>,
-        std::sync::MutexGuard<'static, ()>,
-    ) {
-        let guard = crate::app::testkit::DB_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    fn temp_history_path(tag: &str) -> std::path::PathBuf {
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let p = std::env::temp_dir().join(format!("vh_hist_{tag}_{}_{n}", std::process::id()));
-        let prev = std::env::var("VIORAHARNESS_HISTORY").ok();
-        std::env::set_var("VIORAHARNESS_HISTORY", &p);
-        (p, prev, guard)
+        std::env::temp_dir().join(format!("vh_hist_{tag}_{}_{n}.json", std::process::id()))
     }
 
-    fn restore_history(path: &std::path::Path, prev: Option<String>) {
-        match prev {
-            Some(v) => std::env::set_var("VIORAHARNESS_HISTORY", v),
-            None => std::env::remove_var("VIORAHARNESS_HISTORY"),
-        }
+    fn cleanup(path: &std::path::Path) {
         let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn history_survives_restart() {
-        let (path, prev, _env_guard) = temp_history("roundtrip");
-        let mut a = InputState::default();
-        a.persist = true;
+        let path = temp_history_path("roundtrip");
+        let mut a = InputState::with_history_file(path.clone());
         a.push_history("first".into());
         a.push_history("second".into());
         drop(a);
-        let b = InputState::with_disk_history();
+        let b = InputState::with_history_file(path.clone());
         assert_eq!(b.history, vec!["first".to_string(), "second".to_string()]);
         assert!(b.persist, "fresh instance keeps persisting");
-        restore_history(&path, prev);
+        cleanup(&path);
     }
 
     #[test]
     fn history_skips_consecutive_duplicates() {
-        let (path, prev, _env_guard) = temp_history("dedup");
-        let mut a = InputState::default();
-        a.persist = true;
+        let path = temp_history_path("dedup");
+        let mut a = InputState::with_history_file(path.clone());
         a.push_history("same".into());
         a.push_history("same".into());
         assert_eq!(a.history.len(), 1);
-        assert_eq!(InputState::load_history().len(), 1);
-        restore_history(&path, prev);
+        assert_eq!(InputState::load_history_from(&path).len(), 1);
+        cleanup(&path);
     }
 
     #[test]
     fn history_tolerates_missing_and_corrupt_files() {
-        let (path, prev, _env_guard) = temp_history("corrupt");
-        assert!(InputState::load_history().is_empty(), "missing file");
+        let path = temp_history_path("corrupt");
+        assert!(
+            InputState::load_history_from(&path).is_empty(),
+            "missing file"
+        );
         std::fs::write(&path, "not json{{").unwrap();
-        assert!(InputState::load_history().is_empty(), "corrupt file");
+        assert!(
+            InputState::load_history_from(&path).is_empty(),
+            "corrupt file"
+        );
         std::fs::write(&path, "[\"kept\", 42]").unwrap();
-        assert!(InputState::load_history().is_empty(), "wrong shape");
-        restore_history(&path, prev);
+        assert!(
+            InputState::load_history_from(&path).is_empty(),
+            "wrong shape"
+        );
+        cleanup(&path);
     }
 
     #[test]
     fn history_caps_at_100_entries() {
-        let (path, prev, _env_guard) = temp_history("cap");
-        let mut a = InputState::default();
-        a.persist = true;
+        let path = temp_history_path("cap");
+        let mut a = InputState::with_history_file(path.clone());
         for i in 0..105 {
             a.push_history(format!("p{i}"));
         }
@@ -471,15 +500,51 @@ mod tests {
         let disk: Vec<String> =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(disk.len(), 100);
-        restore_history(&path, prev);
+        cleanup(&path);
     }
 
     #[test]
     fn memory_only_by_default() {
         let mut a = InputState::default();
         assert!(!a.persist, "tests and non-TUI uses stay memory-only");
+        assert!(a.history_file.is_none());
         a.push_history("x".into());
         assert_eq!(a.history, vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn drop_last_history_if_discards_generated_prompt() {
+        let path = temp_history_path("drop");
+        let mut a = InputState::with_history_file(path.clone());
+        a.push_history("/skill-new plot things".into());
+        a.push_history("GENERATED-MEGA-PROMPT".into());
+        a.drop_last_history_if("GENERATED-MEGA-PROMPT");
+        assert_eq!(a.history, vec!["/skill-new plot things".to_string()]);
+        let disk = InputState::load_history_from(&path);
+        assert_eq!(
+            disk,
+            vec!["/skill-new plot things".to_string()],
+            "pop re-saved"
+        );
+        // Non-matching expected leaves history alone.
+        a.drop_last_history_if("something-else");
+        assert_eq!(a.history.len(), 1);
+        cleanup(&path);
+    }
+
+    #[test]
+    fn history_files_are_isolated() {
+        let p1 = temp_history_path("iso1");
+        let p2 = temp_history_path("iso2");
+        let mut a = InputState::with_history_file(p1.clone());
+        a.push_history("only-in-one".into());
+        assert!(
+            InputState::load_history_from(&p2).is_empty(),
+            "no cross-talk"
+        );
+        assert_eq!(InputState::load_history_from(&p1).len(), 1);
+        cleanup(&p1);
+        cleanup(&p2);
     }
 
     #[test]

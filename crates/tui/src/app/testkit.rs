@@ -5,6 +5,14 @@ use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 pub(crate) fn test_app() -> App {
     let mut app = App::new("unittest/test-model".to_string());
     app.busy = false;
+    // Memory-only: unit tests must never read the user's real prompt
+    // history into memory nor write test prompts back to disk.
+    // App::new loads disk history; drop it here.
+    app.input.persist = false;
+    app.input.history_file = None;
+    app.input.history.clear();
+    app.input.hist_idx = None;
+    app.input.draft.clear();
     app
 }
 

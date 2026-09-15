@@ -137,15 +137,19 @@ impl App {
                 match skill_new_request(&parts[1..], &cwd) {
                     Ok((description, target)) => {
                         let prompt = skill_creator_prompt(&description, &target);
-                        self.input
-                            .push_history(format!("/skill-new {}", parts[1..].join(" ")));
                         self.input.text.clear();
                         self.input.cursor = 0;
-                        if let Err(e) = self.submit_text(prompt) {
+                        if let Err(e) = self.submit_text(prompt.clone()) {
                             self.messages.push(Msg::new(
                                 "system",
                                 format!("skill creator failed to start: {e:#}"),
                             ));
+                        } else {
+                            // submit_text recorded the generated creator
+                            // prompt; history should keep what the user
+                            // typed (the /skill-new line, pushed by the
+                            // Enter handler), not the mega-prompt.
+                            self.input.drop_last_history_if(&prompt);
                         }
                     }
                     Err(usage) => {
@@ -247,6 +251,10 @@ impl App {
             "/tasks" | "/task" | "/bg" | "/jobs" => {
                 self.task_cursor = 0;
                 self.popup = Popup::Tasks;
+            }
+            "/agents" | "/agent" => {
+                self.agent_cursor = 0;
+                self.popup = Popup::Agents;
             }
             "/errors" | "/error" | "/err" => {
                 self.error_cursor = 0;
@@ -541,6 +549,9 @@ impl App {
                                         title
                                     ),
                                 ));
+                                // Same session, new title: the event loop's
+                                // id-change detector would miss it.
+                                self.sync_terminal_title();
                             }
                             Err(e) => {
                                 self.messages

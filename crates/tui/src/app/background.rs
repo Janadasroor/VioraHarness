@@ -24,6 +24,15 @@ impl App {
                     done.status.as_str()
                 ),
             ));
+            self.notify(
+                &format!(
+                    "{} task {} {} ({detail})",
+                    mark,
+                    short_task_id(&done.id),
+                    done.status.as_str()
+                ),
+                done.status == BgStatus::Error,
+            );
             self.note_task_completion(&done);
             if !self.wake_on_tasks || self.model.trim().is_empty() {
                 continue;
@@ -138,6 +147,8 @@ impl App {
                 | "/task"
                 | "/bg"
                 | "/jobs"
+                | "/agents"
+                | "/agent"
                 | "/errors"
                 | "/error"
                 | "/err"
@@ -357,6 +368,8 @@ impl App {
                 | "/task"
                 | "/bg"
                 | "/jobs"
+                | "/agents"
+                | "/agent"
                 | "/errors"
                 | "/error"
                 | "/err"

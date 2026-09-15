@@ -2,7 +2,7 @@ use super::*;
 
 /// Settings dialog rows — every TUI behaviour knob in one place.
 /// Order is the display order; `SETTINGS_COUNT` must match.
-pub(crate) const SETTINGS_COUNT: usize = 9;
+pub(crate) const SETTINGS_COUNT: usize = 10;
 
 pub(crate) const SETTINGS_THEME: usize = 0;
 pub(crate) const SETTINGS_MODE: usize = 1;
@@ -13,6 +13,7 @@ pub(crate) const SETTINGS_TOOL_CARDS: usize = 5;
 pub(crate) const SETTINGS_WAKE: usize = 6;
 pub(crate) const SETTINGS_COMPACT_THRESHOLD: usize = 7;
 pub(crate) const SETTINGS_COMPACT_KEEP: usize = 8;
+pub(crate) const SETTINGS_NOTIFY: usize = 9;
 
 const THRESHOLDS: [f64; 6] = [0.5, 0.6, 0.7, 0.8, 0.85, 0.9];
 const KEEP_TAILS: [usize; 5] = [4, 10, 20, 40, 80];
@@ -89,6 +90,12 @@ pub(crate) fn persist_wake_on_tasks(wake: bool) {
             "wake_on_task_done",
             serde_json::Value::Bool(wake),
         );
+    });
+}
+
+pub(crate) fn persist_notifications(on: bool) {
+    update_config_file(|val| {
+        set_nested(val, "tui", "notifications", serde_json::Value::Bool(on));
     });
 }
 
@@ -242,6 +249,15 @@ impl App {
                     "tail kept".into(),
                 )
             }
+            SETTINGS_NOTIFY => (
+                "Notifications".into(),
+                if self.notifications {
+                    "on".into()
+                } else {
+                    "off".into()
+                },
+                "desktop alerts".into(),
+            ),
             _ => ("?".into(), String::new(), String::new()),
         }
     }
@@ -320,6 +336,15 @@ impl App {
         );
     }
 
+    pub(crate) fn toggle_notifications_silent(&mut self) {
+        self.notifications = !self.notifications;
+        persist_notifications(self.notifications);
+        self.status = format!(
+            "notifications {} — saved",
+            if self.notifications { "ON" } else { "OFF" }
+        );
+    }
+
     pub(crate) fn cycle_theme_silent(&mut self, dir: i32) {
         if self.available_themes.is_empty() {
             return;
@@ -386,6 +411,7 @@ impl App {
             SETTINGS_WAKE => self.toggle_wake_silent(),
             SETTINGS_COMPACT_THRESHOLD => self.cycle_threshold_silent(dir),
             SETTINGS_COMPACT_KEEP => self.cycle_keep_tail_silent(dir),
+            SETTINGS_NOTIFY => self.toggle_notifications_silent(),
             _ => {}
         }
     }
@@ -403,6 +429,7 @@ impl App {
             SETTINGS_THINKING => self.toggle_thinking_silent(),
             SETTINGS_THINK_LEVEL => self.cycle_thinking_level(1),
             SETTINGS_WAKE => self.toggle_wake_silent(),
+            SETTINGS_NOTIFY => self.toggle_notifications_silent(),
             _ => self.settings_cycle(1),
         }
     }
@@ -537,6 +564,31 @@ mod tests {
                 .and_then(|x| x.as_bool()),
             Some(!before)
         );
+    }
+
+    #[test]
+    fn settings_notifications_toggle_persists() {
+        let _g = isolated_env("notify");
+        let mut app = test_app();
+        let before = app.notifications;
+        app.handle_slash("/settings");
+        app.settings_cursor = SETTINGS_NOTIFY;
+        app.handle_popup_key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::empty(),
+        ));
+        assert_eq!(app.notifications, !before);
+        let cfg = std::fs::read_to_string(config_target_path()).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&cfg).unwrap();
+        assert_eq!(
+            v.get("tui")
+                .and_then(|t| t.get("notifications"))
+                .and_then(|x| x.as_bool()),
+            Some(!before)
+        );
+        let (label, value, _) = app.settings_row(SETTINGS_NOTIFY);
+        assert_eq!(label, "Notifications");
+        assert_eq!(value, if !before { "on" } else { "off" });
     }
 
     #[test]

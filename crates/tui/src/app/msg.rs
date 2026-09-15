@@ -110,6 +110,7 @@ pub(crate) enum Popup {
     ToolOutput,
     Skills,
     Tasks,
+    Agents,
     Errors,
     Rewind,
     Settings,

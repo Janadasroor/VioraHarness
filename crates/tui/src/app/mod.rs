@@ -2,6 +2,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{backend::TestBackend, layout::Rect, Terminal};
 use std::collections::HashSet;
 use std::time::Duration;
+mod agents;
 mod background;
 mod clipboard;
 mod commands;
@@ -13,6 +14,7 @@ mod latex;
 mod layout;
 mod markdown;
 mod msg;
+mod notify;
 mod popups;
 mod render;
 pub(crate) mod settings;
@@ -20,6 +22,7 @@ mod skills;
 #[cfg(test)]
 mod testkit;
 mod turn;
+mod window_title;
 pub(crate) use clipboard::*;
 pub(crate) use format::*;
 pub(crate) use image::*;
@@ -35,6 +38,21 @@ type ModelFetchRx =
 pub struct App {
     pub model: String,
     pub session_id: String,
+    /// Cached DB title of the current session (`None` = untitled/new).
+    /// Drives the terminal window title; refreshed by
+    /// [`App::sync_terminal_title`].
+    pub(crate) session_title: Option<String>,
+    /// Session id the window title was last synced for (event loop
+    /// detects switches without a DB hit per frame).
+    pub(crate) titled_session: String,
+    /// Last time the session title was re-read from the DB. Throttled
+    /// (~2s): picks up the loop's auto-title after the first prompt —
+    /// the immediate 80-char rename and the later LLM title — plus
+    /// external CLI/server renames, without a query per frame.
+    pub(crate) last_title_poll: std::time::Instant,
+    /// Last composed title pushed to the terminal (re-emit only on
+    /// change).
+    pub(crate) last_window_title: String,
     pub messages: Vec<Msg>,
     pub input: InputState,
     pub scroll: usize,
@@ -74,6 +92,7 @@ pub struct App {
     pub(crate) settings_cursor: usize,
 
     pub(crate) session_cursor: usize,
+    pub(crate) agent_cursor: usize,
     pub(crate) task_cursor: usize,
     pub(crate) error_cursor: usize,
     pub(crate) rewind_cursor: usize,
@@ -134,6 +153,11 @@ pub struct App {
     pub(crate) ctx_freed_tokens: usize,
 
     pub(crate) wake_on_tasks: bool,
+
+    /// Desktop notifications for turn done/failed, permission/question
+    /// prompts and background task completions (`tui.notifications`,
+    /// default on; `VIORAHARNESS_NOTIFY` overrides).
+    pub(crate) notifications: bool,
 
     pub(crate) queued_prompts: Vec<QueuedPrompt>,
 
@@ -1372,6 +1396,8 @@ impl App {
             true
         };
 
+        let notifications = notify::resolve_notifications();
+
         let initial_models = Self::fetch_models_from_openrouter();
 
         // Agent mode: explicit --mode/env wins, then the last-opened
@@ -1401,6 +1427,10 @@ impl App {
         Self {
             model: model.clone(),
             session_id: sid,
+            session_title: None,
+            titled_session: String::new(),
+            last_window_title: String::new(),
+            last_title_poll: std::time::Instant::now(),
             messages: Vec::new(),
             input: InputState::with_disk_history(),
             scroll: 0,
@@ -1440,6 +1470,7 @@ impl App {
             ],
             settings_cursor: 0,
             session_cursor: 0,
+            agent_cursor: 0,
             task_cursor: 0,
             error_cursor: 0,
             rewind_cursor: 0,
@@ -1476,6 +1507,7 @@ impl App {
             compact_rx: None,
             ctx_freed_tokens: 0,
             wake_on_tasks,
+            notifications,
             queued_prompts: Vec::new(),
             instant_injector: None,
             turn_session: None,
@@ -1526,10 +1558,13 @@ impl App {
         {
             tracing::warn!("mouse capture unavailable: {e}");
         }
+        // Window shows the chat title instead of the shell path.
+        self.sync_terminal_title();
         let sid = self.session_id.clone();
         let res = self.event_loop(&mut terminal, &input_rx).await;
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
+        Self::restore_terminal_title();
         match res {
             Ok(()) => Ok(self.session_id),
             Err(e) => {
@@ -1549,6 +1584,19 @@ impl App {
         loop {
             if self.should_quit {
                 break;
+            }
+
+            // Window follows the chat: re-sync on session switch, plus
+            // a throttled re-read so the loop's auto-title lands
+            // dynamically after the first prompt (immediate rename at
+            // turn start, LLM title later). /rename refreshes
+            // explicitly since the id is unchanged there. One indexed
+            // SELECT per 2s worst case — never per frame.
+            if self.session_id != self.titled_session
+                || self.last_title_poll.elapsed() >= Duration::from_secs(2)
+            {
+                self.last_title_poll = std::time::Instant::now();
+                self.sync_terminal_title();
             }
 
             if let Some(rx) = &mut self.model_fetch_rx {
@@ -1611,6 +1659,7 @@ impl App {
             self.poll_compact();
 
             self.poll_task_completions();
+            self.poll_subagent_completions();
 
             if let Some(rx) = &mut self.perm_rx {
                 match rx.try_recv() {
@@ -1620,6 +1669,7 @@ impl App {
                         self.popup = Popup::PermissionAsk;
                         self.perm_cursor = 0;
                         self.status = "permission ask — choose".into();
+                        self.notify("input needed — permission ask — choose", true);
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         self.perm_rx = None;
@@ -1645,6 +1695,7 @@ impl App {
                         self.q_custom.clear();
                         self.q_custom_active = false;
                         self.status = "question — answer to continue".into();
+                        self.notify("input needed — question — answer to continue", true);
                     }
                     Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
                         self.q_rx = None;
@@ -1889,7 +1940,7 @@ impl App {
                         self.streaming_buf.clear();
                         match handle.await {
                             Ok(Ok(text)) => {
-                                let mut msg = Msg::new("assistant", text);
+                                let mut msg = Msg::new("assistant", text.clone());
 
                                 if !self.thinking_buf.trim().is_empty() {
                                     msg.reasoning = Some(self.thinking_buf.clone());
@@ -1897,14 +1948,29 @@ impl App {
                                 self.thinking_buf.clear();
                                 self.messages.push(msg);
                                 self.status = "ready".into();
+                                let preview: String = text
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(160)
+                                    .collect();
+                                if preview.trim().is_empty() {
+                                    self.notify("turn done", false);
+                                } else {
+                                    self.notify(&format!("turn done — {preview}"), false);
+                                }
                             }
                             Ok(Err(e)) => {
                                 self.report_error("turn", format!("error: {e:#}"));
                                 self.status = "error".into();
+                                let what: String = format!("{e:#}").chars().take(200).collect();
+                                self.notify(&format!("turn failed — {what}"), true);
                             }
                             Err(e) => {
                                 self.report_error("turn", format!("join error: {e}"));
                                 self.status = "error".into();
+                                self.notify("turn failed — join error", true);
                             }
                         }
                     }
