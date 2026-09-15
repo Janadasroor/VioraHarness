@@ -541,6 +541,18 @@ pub fn register_handle(id: &str, handle: tokio::task::AbortHandle) {
         .insert(id.to_string(), handle);
 }
 
+/// Newest run linked to a transcript session, if any (TUI resolves the
+/// read-only guard and /agents navigation through this).
+pub fn run_for_session(session_id: &str) -> Option<SubagentRun> {
+    hydrate_runs();
+    RUNS.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .rev()
+        .find(|r| r.session_id.as_deref() == Some(session_id))
+        .cloned()
+}
+
 /// Link a run to the chat session holding its transcript (pool internal,
 /// right after spawn). The link persists with the row, so /agents can
 /// open the subagent's own view after restarts too.
@@ -899,6 +911,26 @@ mod tests {
         // Unknown ids never panic.
         set_run_session("sa_nonexistent", "sub-nope");
         track_finish(&id, true, "done");
+        let _ = take_completions();
+    }
+
+    #[test]
+    fn run_for_session_resolves_link() {
+        let _env = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(run_for_session("sub-nope-missing").is_none());
+        let (id, _) = track_start("explore", &unique_prompt("resolve"), "eda");
+        assert!(run_for_session("sub-resolve9").is_none(), "no link yet");
+        set_run_session(&id, "sub-resolve9");
+        assert_eq!(
+            run_for_session("sub-resolve9").map(|r| r.id),
+            Some(id.clone()),
+            "linked run resolves"
+        );
+        track_finish(&id, true, "done");
+        assert!(
+            run_for_session("sub-resolve9").is_some(),
+            "finished runs keep the link (own view stays openable)"
+        );
         let _ = take_completions();
     }
 
