@@ -18,7 +18,10 @@ pub(crate) use safety::{split_shell_segments, strip_wrappers};
 
 pub struct AgentLoop {
     pub registry: ToolRegistry,
-    pub rules: Vec<Rule>,
+    /// Evaluated per tool call (last-match wins). Behind a lock so an
+    /// interactive AllowAlways persisted mid-turn takes effect for the
+    /// rest of that turn, not just the next one (`run_inner` is `&self`).
+    pub rules: std::sync::RwLock<Vec<Rule>>,
     pub max_tokens: usize,
     /// Agent mode for this loop (`eda` = full tools). The registry is
     /// built from the mode, so the model only sees mode tools; dispatch
@@ -76,7 +79,7 @@ impl AgentLoop {
         let registry = crate::mode::registry_for_mode(&mode);
         Self {
             registry,
-            rules,
+            rules: std::sync::RwLock::new(rules),
             max_tokens: 128_000,
             mode,
             injector: Injector::default(),
@@ -97,7 +100,7 @@ impl AgentLoop {
         let registry = crate::mode::registry_for_mode(&mode);
         Self {
             registry,
-            rules: load_rules_from_config(),
+            rules: std::sync::RwLock::new(load_rules_from_config()),
             max_tokens: 128_000,
             mode,
             injector: Injector::default(),
@@ -108,7 +111,7 @@ impl AgentLoop {
     pub fn with_registry(registry: ToolRegistry) -> Self {
         Self {
             registry,
-            rules: load_rules_from_config(),
+            rules: std::sync::RwLock::new(load_rules_from_config()),
             max_tokens: 128_000,
             mode: crate::mode::ModeGuard::current(),
             injector: Injector::default(),
@@ -780,7 +783,10 @@ impl AgentLoop {
                     }
                 }
 
-                let mut decision = decide(&self.rules, &name, &args_str);
+                let mut decision = {
+                    let rules = self.rules.read().unwrap_or_else(|e| e.into_inner());
+                    decide(&rules, &name, &args_str)
+                };
 
                 if name == "bash" && decision == Decision::Allow && is_dangerous_bash(&args_str) {
                     tracing::warn!("dangerous bash downgraded to ask: {args_str}");
@@ -901,6 +907,14 @@ impl AgentLoop {
                                             Ok(crate::permissions::InteractiveDecision::AllowAlways) => {
 
                                                 persist_allow_always(&name, &args_str);
+                                                // The file changed mid-turn but
+                                                // the rules above were read from
+                                                // the lock — reload it so the
+                                                // grant covers the rest of THIS
+                                                // turn, not just the next one.
+                                                if let Ok(mut rules) = self.rules.write() {
+                                                    *rules = load_rules_from_config();
+                                                }
 
 
                                                 if name == "write" {
@@ -1150,6 +1164,43 @@ mod tests {
         assert!(left.contains(&"unrelated.txt".to_string()));
         assert!(left.contains(&"vioraharness_tool_x_4.json".to_string()));
         assert!(left.contains(&"vioraharness_tool_x_3.json".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allow_always_reload_takes_effect_same_turn() {
+        // Regression: "Allow always" persisted to vioraharness.json but
+        // the running turn kept its startup snapshot, so the next
+        // same-family command in THAT turn asked again. The AllowAlways
+        // branch now reloads the lock — simulate exactly that.
+        let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("VIORAHARNESS_CONFIG").ok();
+        let dir = std::env::temp_dir().join(format!("vh-perm-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cfg = dir.join("vioraharness.json");
+        std::fs::write(&cfg, r#"{"permissions": {"bash": "ask"}}"#).unwrap();
+        std::env::set_var("VIORAHARNESS_CONFIG", &cfg);
+        let loop_ = AgentLoop::with_mode("eda");
+        let args = r#"{"command": "ls /tmp"}"#;
+        let before = {
+            let rules = loop_.rules.read().unwrap();
+            decide(&rules, "bash", args)
+        };
+        assert_eq!(before, Decision::Ask);
+        persist_allow_always("bash", args);
+        if let Ok(mut rules) = loop_.rules.write() {
+            *rules = load_rules_from_config();
+        }
+        let after = {
+            let rules = loop_.rules.read().unwrap();
+            decide(&rules, "bash", args)
+        };
+        assert_eq!(after, Decision::Allow, "grant applies without a new turn");
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_CONFIG", v),
+            None => std::env::remove_var("VIORAHARNESS_CONFIG"),
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 
