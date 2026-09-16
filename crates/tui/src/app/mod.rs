@@ -58,6 +58,9 @@ pub struct App {
     pub scroll: usize,
     pub status: String,
     pub should_quit: bool,
+    /// First idle Esc / selection-less Ctrl+C arms quitting; a second one
+    /// within the window quits. Any other key disarms (see `confirm_quit`).
+    pub(crate) quit_armed_at: Option<std::time::Instant>,
     pub busy: bool,
     pub(crate) pending: Option<tokio::task::JoinHandle<anyhow::Result<String>>>,
     pub(crate) stream_rx:
@@ -1462,6 +1465,7 @@ impl App {
             scroll: 0,
             status: "ready".into(),
             should_quit: false,
+            quit_armed_at: None,
             busy: false,
             pending: None,
             popup: Popup::None,
@@ -2096,18 +2100,14 @@ impl App {
                             } else {
                                 self.status = "nothing selected — drag to select first".into();
                             }
+                            self.disarm_quit();
                             continue;
                         }
                         if k.code == KeyCode::Char('c')
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                             && !k.modifiers.contains(KeyModifiers::ALT)
                         {
-                            if self.input.selected_range().is_some() {
-                                self.copy_input_selection();
-                            } else if self.selection.is_some() {
-                                self.copy_pending = true;
-                            } else {
-                                self.selection = None;
+                            if self.handle_ctrl_c() {
                                 self.should_quit = true;
                                 break;
                             }

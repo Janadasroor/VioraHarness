@@ -2,6 +2,58 @@ use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
 impl App {
+    /// Window for the double-press quit: idle Esc / selection-less Ctrl+C
+    /// arms quitting, a second one inside this window quits the TUI.
+    const QUIT_ARM_SECS: u64 = 3;
+
+    /// True while a quit is armed and the window hasn't lapsed.
+    pub(crate) fn quit_armed(&self) -> bool {
+        self.quit_armed_at
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(Self::QUIT_ARM_SECS))
+    }
+
+    fn arm_quit(&mut self) {
+        self.quit_armed_at = Some(std::time::Instant::now());
+        self.status = "press Esc or Ctrl+C again to quit".into();
+    }
+
+    pub(crate) fn disarm_quit(&mut self) {
+        self.quit_armed_at = None;
+    }
+
+    /// Shared double-press quit. First idle press arms (status hint),
+    /// second press inside the window returns true (caller quits).
+    /// Any other key disarms via the callers below.
+    pub(crate) fn confirm_quit(&mut self) -> bool {
+        if self.quit_armed() {
+            self.quit_armed_at = None;
+            return true;
+        }
+        self.arm_quit();
+        false
+    }
+
+    /// Bare Ctrl+C (no Ctrl+Alt): copy selection when there is one,
+    /// otherwise the double-press quit path. Returns true when the caller
+    /// must quit now. Extracted so the event loop and tests share it.
+    pub(crate) fn handle_ctrl_c(&mut self) -> bool {
+        if self.input.selected_range().is_some() {
+            self.copy_input_selection();
+            self.disarm_quit();
+            return false;
+        }
+        if self.selection.is_some() {
+            self.copy_pending = true;
+            self.disarm_quit();
+            return false;
+        }
+        if self.confirm_quit() {
+            self.selection = None;
+            return true;
+        }
+        false
+    }
+
     /// Test + compat entry: plain key without modifiers.
     #[cfg(test)]
     pub(crate) async fn handle_key(&mut self, code: KeyCode) -> anyhow::Result<()> {
@@ -12,6 +64,11 @@ impl App {
     pub(crate) async fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         let code = key.code;
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        // Any key but Esc cancels a pending double-press quit — Esc
+        // reaches its own arm below, where only a fully idle press counts.
+        if code != KeyCode::Esc {
+            self.disarm_quit();
+        }
         if self.busy
             && !matches!(
                 code,
@@ -261,8 +318,11 @@ impl App {
                             ),
                         ));
                     }
-                } else {
+                } else if self.popup != Popup::None {
                     self.popup = Popup::None;
+                } else if self.confirm_quit() {
+                    // Fully idle Esc: first press arms, second quits.
+                    self.should_quit = true;
                 }
             }
             KeyCode::Enter => {
@@ -959,5 +1019,51 @@ mod tests {
             "no double on drain: {:?}",
             app.input.history
         );
+    }
+
+    #[tokio::test]
+    async fn idle_esc_arms_first_second_quits() {
+        let mut app = test_app();
+        assert!(!app.should_quit);
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(!app.should_quit, "first idle Esc only arms");
+        assert!(app.quit_armed(), "armed");
+        assert!(app.status.contains("again to quit"), "{}", app.status);
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(app.should_quit, "second Esc quits");
+    }
+
+    #[tokio::test]
+    async fn other_keys_disarm_pending_quit() {
+        let mut app = test_app();
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(app.quit_armed());
+        app.handle_key(KeyCode::Char('x')).await.unwrap();
+        assert!(!app.quit_armed(), "typing cancels the arm");
+        assert_eq!(app.input.text, "x");
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(!app.should_quit, "re-arms instead of quitting");
+        assert!(app.input.text.is_empty(), "idle Esc still clears input");
+    }
+
+    #[test]
+    fn bare_ctrl_c_arms_first_second_quits() {
+        let mut app = test_app();
+        assert!(!app.handle_ctrl_c(), "first press arms");
+        assert!(app.quit_armed());
+        assert!(app.handle_ctrl_c(), "second press quits");
+    }
+
+    #[test]
+    fn ctrl_c_with_selection_copies_and_disarms() {
+        let mut app = test_app();
+        assert!(!app.handle_ctrl_c(), "armed");
+        app.input.text = "hello".into();
+        app.input.cursor = 5;
+        app.input.sel_anchor = Some(0);
+        assert!(app.input.selected_range().is_some());
+        assert!(!app.handle_ctrl_c(), "copies instead of quitting");
+        assert!(!app.quit_armed(), "copying disarms");
+        assert!(!app.should_quit);
     }
 }
