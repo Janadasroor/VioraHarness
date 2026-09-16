@@ -246,6 +246,17 @@ impl AgentLoop {
             // Record the working mode (never touches updated_at, so mode
             // switches don't reorder session lists).
             let _ = s.set_session_mode(&session_id, &self.mode);
+            // Fail-closed leftovers: a `pending` tool row means a previous
+            // turn died between record and settle (crash/quit). Turns in a
+            // session are serialized and this turn hasn't recorded anything
+            // yet, so any pending row here is stale — flip it before it
+            // can render as an eternally-running call.
+            if s.fail_pending_tool_calls(&session_id, "interrupted (previous turn ended)")
+                .unwrap_or(0)
+                > 0
+            {
+                tracing::warn!("failed stale pending tool calls in {session_id}");
+            }
         }
 
         let ctx = assemble_context(prompt);

@@ -96,6 +96,20 @@ impl App {
                 tracker::SubagentStatus::Killed => ("⑂○", false),
                 tracker::SubagentStatus::Running => continue,
             };
+            // Runs that finished before first sight (pre-boot history,
+            // missed launch ticks) never got a launch line — post it now
+            // so the completion below doesn't dangle without context.
+            // Once each: completions drain once and launches are id-set.
+            if self.seen_subagents.insert(done.id.clone()) {
+                let title: String = done.prompt_preview.chars().take(100).collect();
+                let launch = format!(
+                    "⑂ subagent {} {} launched — {title} (/agents to watch)",
+                    done.kind,
+                    short_task_id(&done.id),
+                );
+                self.messages.push(Msg::new("system", launch.clone()));
+                self.persist_system_notice(&launch);
+            }
             self.messages.push(Msg::new(
                 "system",
                 format!(
@@ -1191,6 +1205,50 @@ mod tests {
         assert!(
             app.messages.iter().any(|m| m.content.contains("(done)")),
             "completion survives reload"
+        );
+    }
+
+    #[test]
+    fn unseen_completion_posts_launch_first() {
+        // A run that finished before first sight (pre-boot history) never
+        // got a launch line — the completion must bring it, launch first,
+        // so the notice doesn't dangle without context.
+        let (_env, db) = agents_env("unseen");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store
+            .create_session("sess-main-u", "m", Some("main"))
+            .unwrap();
+        let mut app = test_app();
+        app.session_id = "sess-main-u".into();
+        app.booted_at = i64::MAX;
+        let prompt = unique_prompt("unseen-launch");
+        let (id, _) = tracker::track_start("explore", &prompt, "eda");
+        tracker::set_run_parent(&id, "sess-main-u");
+        app.poll_subagent_starts();
+        assert!(
+            !app.messages.iter().any(|m| m.content.contains("launched")),
+            "pre-boot launch stays silent"
+        );
+        tracker::track_finish(&id, true, "late result");
+        app.wake_on_tasks = false;
+        app.poll_subagent_completions();
+        let launch = app
+            .messages
+            .iter()
+            .position(|m| m.content.contains("launched") && m.content.contains(&prompt[..20]));
+        let done = app
+            .messages
+            .iter()
+            .position(|m| m.content.contains("(done)"));
+        assert!(
+            launch.is_some_and(|l| done.is_some_and(|d| l < d)),
+            "launch posted before completion"
+        );
+        app.reload_display_from_store(&store, "sess-main-u");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("launched")),
+            "launch survives reload"
         );
     }
 

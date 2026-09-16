@@ -196,4 +196,22 @@ impl SessionStore {
         tx.commit()?;
         Ok(())
     }
+
+    /// Fail this session's still-`pending` tool calls (fail-closed).
+    /// A `pending` row means the recording turn died between record and
+    /// settle (crash/quit/kill); without this it reads as an eternally
+    /// running call in history. Call at turn start, before the new turn
+    /// records anything — turns in a session are serialized, so any
+    /// leftover pending row is stale by construction. No events rows:
+    /// these never streamed, there is nothing to reconcile downstream.
+    /// Returns the number of rows flipped.
+    pub fn fail_pending_tool_calls(&self, session_id: &str, error: &str) -> Result<usize> {
+        let conn = self.pool.get()?;
+        let now = Self::now();
+        let n = conn.execute(
+            "UPDATE tool_calls SET error = ?1, status = 'error', settled_at = ?2 WHERE session_id = ?3 AND status = 'pending'",
+            params![error, now, session_id],
+        )?;
+        Ok(n)
+    }
 }

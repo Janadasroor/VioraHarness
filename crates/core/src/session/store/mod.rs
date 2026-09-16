@@ -318,6 +318,67 @@ mod tests {
     }
 
     #[test]
+    fn fail_pending_tool_calls_flips_only_stale_rows() {
+        // A crashed turn leaves `pending` tool rows that would render as
+        // eternally-running calls. Turn start flips them via
+        // `fail_pending_tool_calls`; settled rows are untouched.
+        let s = mem_store();
+        s.create_session("sess-pend", "m", None).unwrap();
+        s.record_tool_call(
+            "call_stuck",
+            "sess-pend",
+            3,
+            "bash",
+            &serde_json::json!({"command": "sleep 30"}),
+        )
+        .unwrap();
+        s.record_tool_call(
+            "call_ok",
+            "sess-pend",
+            5,
+            "read",
+            &serde_json::json!({"path": "x"}),
+        )
+        .unwrap();
+        s.settle_tool_call("sess-pend", "call_ok", &serde_json::json!({"ok": true}))
+            .unwrap();
+        assert_eq!(
+            s.fail_pending_tool_calls("sess-pend", "interrupted (previous turn ended)")
+                .unwrap(),
+            1,
+            "only the stale pending row flips"
+        );
+        assert_eq!(
+            s.fail_pending_tool_calls("sess-pend", "x").unwrap(),
+            0,
+            "idempotent on second turn start"
+        );
+        let status_of = |id: &str| -> (String, Option<String>) {
+            s.pool
+                .get()
+                .unwrap()
+                .query_row(
+                    "SELECT status, error FROM tool_calls WHERE id = ?1",
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            status_of("call_stuck"),
+            (
+                "error".to_string(),
+                Some("interrupted (previous turn ended)".to_string())
+            )
+        );
+        assert_eq!(
+            status_of("call_ok").0,
+            "settled",
+            "settled rows are never reflipped"
+        );
+    }
+
+    #[test]
     fn migrate_creates_subagent_runs_table() {
         let s = mem_store();
         let count: i64 = s
