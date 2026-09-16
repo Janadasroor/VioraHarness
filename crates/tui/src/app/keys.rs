@@ -1,24 +1,44 @@
 use super::*;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 
+/// Double-press confirmation slot: quitting the TUI vs cancelling the
+/// running turn. One shared slot — arming one clears the other, so a
+/// stale arm can never fire in the wrong context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ConfirmKind {
+    Quit,
+    CancelTurn,
+}
+
 impl App {
-    /// Window for the double-press quit: idle Esc / selection-less Ctrl+C
-    /// arms quitting, a second one inside this window quits the TUI.
-    const QUIT_ARM_SECS: u64 = 3;
+    /// Window for double-press confirms: first press arms (status hint),
+    /// second press inside this window executes.
+    const CONFIRM_SECS: u64 = 3;
 
     /// True while a quit is armed and the window hasn't lapsed.
     pub(crate) fn quit_armed(&self) -> bool {
-        self.quit_armed_at
-            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(Self::QUIT_ARM_SECS))
+        self.confirm_state(ConfirmKind::Quit)
     }
 
-    fn arm_quit(&mut self) {
-        self.quit_armed_at = Some(std::time::Instant::now());
-        self.status = "press Esc or Ctrl+C again to quit".into();
+    /// True while a turn-cancel is armed and the window hasn't lapsed.
+    pub(crate) fn cancel_armed(&self) -> bool {
+        self.confirm_state(ConfirmKind::CancelTurn)
+    }
+
+    fn confirm_state(&self, kind: ConfirmKind) -> bool {
+        matches!(self.confirm_armed, Some((k, t)) if k == kind && t.elapsed() < std::time::Duration::from_secs(Self::CONFIRM_SECS))
+    }
+
+    fn arm_confirm(&mut self, kind: ConfirmKind) {
+        self.confirm_armed = Some((kind, std::time::Instant::now()));
+        self.status = match kind {
+            ConfirmKind::Quit => "press Esc or Ctrl+C again to quit".into(),
+            ConfirmKind::CancelTurn => "press Esc again to cancel the turn".into(),
+        };
     }
 
     pub(crate) fn disarm_quit(&mut self) {
-        self.quit_armed_at = None;
+        self.confirm_armed = None;
     }
 
     /// Shared double-press quit. First idle press arms (status hint),
@@ -26,10 +46,10 @@ impl App {
     /// Any other key disarms via the callers below.
     pub(crate) fn confirm_quit(&mut self) -> bool {
         if self.quit_armed() {
-            self.quit_armed_at = None;
+            self.confirm_armed = None;
             return true;
         }
-        self.arm_quit();
+        self.arm_confirm(ConfirmKind::Quit);
         false
     }
 
@@ -64,8 +84,9 @@ impl App {
     pub(crate) async fn handle_key_event(&mut self, key: KeyEvent) -> anyhow::Result<()> {
         let code = key.code;
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
-        // Any key but Esc cancels a pending double-press quit — Esc
-        // reaches its own arm below, where only a fully idle press counts.
+        // Any key but Esc cancels a pending double-press (quit or
+        // cancel) — Esc reaches its own arm below, where only a fully
+        // idle press counts toward quitting.
         if code != KeyCode::Esc {
             self.disarm_quit();
         }
@@ -287,6 +308,14 @@ impl App {
                     self.input.text.clear();
                     self.input.cursor = 0;
                 } else if self.busy {
+                    if !self.cancel_armed() {
+                        // Busy Esc needs confirming too: first press arms,
+                        // second cancels the turn (re-arming clears a stale
+                        // quit arm — contexts never mix).
+                        self.arm_confirm(ConfirmKind::CancelTurn);
+                        return Ok(());
+                    }
+                    self.confirm_armed = None;
                     if let Some(h) = self.pending.take() {
                         h.abort();
                     }
@@ -1065,5 +1094,43 @@ mod tests {
         assert!(!app.handle_ctrl_c(), "copies instead of quitting");
         assert!(!app.quit_armed(), "copying disarms");
         assert!(!app.should_quit);
+    }
+
+    #[tokio::test]
+    async fn busy_esc_arms_first_second_cancels() {
+        let mut app = test_app();
+        app.busy = true;
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(app.busy, "first Esc only arms");
+        assert!(app.cancel_armed(), "cancel armed");
+        assert!(!app.quit_armed(), "quit arm untouched");
+        assert!(app.status.contains("again to cancel"), "{}", app.status);
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(!app.busy, "second Esc cancels the turn");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("cancelled")),
+            "cancel noted"
+        );
+    }
+
+    #[tokio::test]
+    async fn busy_esc_arm_dies_on_other_keys_and_time() {
+        let mut app = test_app();
+        app.busy = true;
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(app.cancel_armed());
+        app.handle_key(KeyCode::Char('x')).await.unwrap();
+        assert!(!app.cancel_armed(), "typing disarms");
+        assert!(app.busy, "turn survives a single Esc");
+        // A lapsed arm counts as no arm: re-arms instead of cancelling.
+        app.input.text.clear();
+        app.input.cursor = 0;
+        app.confirm_armed = Some((
+            ConfirmKind::CancelTurn,
+            std::time::Instant::now() - std::time::Duration::from_secs(30),
+        ));
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(app.busy, "stale arm re-arms");
+        assert!(app.cancel_armed(), "fresh arm");
     }
 }

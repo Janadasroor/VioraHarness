@@ -42,7 +42,7 @@ impl App {
             Popup::Help => vec![
                 Line::from(Span::styled("Keybinds", Style::default().add_modifier(Modifier::BOLD))),
                 Line::from("  Enter      send prompt (Tab to autocomplete) • Alt+Enter newline • Enter while busy queues next"),
-                Line::from("  Esc        clear selection / input / cancel busy / clear pending image • idle Esc twice quits"),
+                Line::from("  Esc        clear selection / input / clear pending image • busy Esc twice cancels • idle Esc twice quits"),
                 Line::from("  Ctrl-C     copy selection (input or chat), else quit (press twice)"),
                 Line::from("  Ctrl-Alt-C copy selection (never quits)"),
                 Line::from("  Shift+←/→/Home/End  select input text (type/BS replaces, Ctrl-C copies)"),

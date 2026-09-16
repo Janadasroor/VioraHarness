@@ -58,9 +58,10 @@ pub struct App {
     pub scroll: usize,
     pub status: String,
     pub should_quit: bool,
-    /// First idle Esc / selection-less Ctrl+C arms quitting; a second one
-    /// within the window quits. Any other key disarms (see `confirm_quit`).
-    pub(crate) quit_armed_at: Option<std::time::Instant>,
+    /// First idle Esc / selection-less Ctrl+C arms quitting, a busy Esc
+    /// arms cancelling; a second matching press within the window fires.
+    /// One shared slot (see `keys::ConfirmKind`) — any other key disarms.
+    pub(crate) confirm_armed: Option<(keys::ConfirmKind, std::time::Instant)>,
     pub busy: bool,
     pub(crate) pending: Option<tokio::task::JoinHandle<anyhow::Result<String>>>,
     pub(crate) stream_rx:
@@ -1465,7 +1466,7 @@ impl App {
             scroll: 0,
             status: "ready".into(),
             should_quit: false,
-            quit_armed_at: None,
+            confirm_armed: None,
             busy: false,
             pending: None,
             popup: Popup::None,

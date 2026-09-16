@@ -887,7 +887,10 @@ mod tests {
             echo: true,
         });
         app.handle_key(KeyCode::Esc).await.unwrap();
-        assert!(!app.busy, "turn cancelled");
+        assert!(app.busy, "first Esc only arms the cancel");
+        assert!(app.cancel_armed());
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(!app.busy, "second Esc cancels the turn");
         assert!(app.queued_prompts.is_empty(), "queue dropped");
         assert!(
             app.messages
@@ -1668,7 +1671,9 @@ mod tests {
             echo: true,
         });
         app.handle_key(KeyCode::Esc).await.unwrap();
-        assert!(!app.busy, "turn cancelled");
+        assert!(app.busy, "first Esc only arms the cancel");
+        app.handle_key(KeyCode::Esc).await.unwrap();
+        assert!(!app.busy, "second Esc cancels the turn");
         assert_eq!(app.queued_prompts.len(), 1, "normal dropped, ⚡ kept");
         assert_eq!(app.queued_prompts[0].send, "urgent");
         assert!(!app.queued_prompts[0].echo, "already echoed");
