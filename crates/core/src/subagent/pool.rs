@@ -134,6 +134,26 @@ fn parent_mode_allow() -> Option<Vec<String>> {
 /// One static semaphore makes the limit real.
 static GLOBAL_SEM: std::sync::LazyLock<Semaphore> = std::sync::LazyLock::new(|| Semaphore::new(4));
 
+/// Await a subagent future with the opt-in timeout
+/// (`VIORAHARNESS_SUBAGENT_TIMEOUT_SECS`). `None` waits indefinitely,
+/// like opencode/Claude Code — the 20-turn loop budget and per-tool
+/// timeouts are the backstops. Cancellation (`x` in /agents) works
+/// either way via the registered abort handle.
+async fn await_subagent(
+    fut: impl std::future::Future<Output = anyhow::Result<String>>,
+    timeout: Option<std::time::Duration>,
+) -> anyhow::Result<String> {
+    match timeout {
+        Some(d) => match tokio::time::timeout(d, fut).await {
+            Ok(r) => r,
+            Err(_) => Err(anyhow::anyhow!(
+                "subagent timed out after {}s (VIORAHARNESS_SUBAGENT_TIMEOUT_SECS)",
+                d.as_secs()
+            )),
+        },
+        None => fut.await,
+    }
+}
 /// Parent context captured at the `task` call site (the loop injects
 /// `parent_depth`/`parent_model`/`session_id` into the tool args; direct
 /// callers use depth 0 / no model / no session). Depth drives both the
@@ -190,7 +210,7 @@ impl SubagentPool {
     /// Full spawn with parent depth/model (the `task` tool path). Blocking
     /// but cancellable: the work runs on a spawned task with its abort
     /// handle registered, so `cancel_run`/`x` in /agents aborts it just
-    /// like a detached run. Times out via `tracker::subagent_timeout()`.
+    /// like a detached run. Opt-in timeout via `tracker::subagent_timeout_opt()`.
     pub async fn spawn_one_full(
         &self,
         kind: SubagentKind,
@@ -217,7 +237,7 @@ impl SubagentPool {
         if let Some(parent_session) = parent.session.as_deref() {
             crate::subagent::tracker::set_run_parent(&run_id, parent_session);
         }
-        let timeout = crate::subagent::tracker::subagent_timeout();
+        let timeout = crate::subagent::tracker::subagent_timeout_opt();
         let fut = Self::execute(
             kind,
             prompt,
@@ -228,15 +248,7 @@ impl SubagentPool {
             parent.model,
             session_id,
         );
-        let handle = tokio::spawn(async move {
-            match tokio::time::timeout(timeout, fut).await {
-                Ok(r) => r,
-                Err(_) => Err(anyhow::anyhow!(
-                    "subagent timed out after {}s (VIORAHARNESS_SUBAGENT_TIMEOUT_SECS)",
-                    timeout.as_secs()
-                )),
-            }
-        });
+        let handle = tokio::spawn(async move { await_subagent(fut, timeout).await });
         crate::subagent::tracker::register_handle(&run_id, handle.abort_handle());
         let res = match handle.await {
             Ok(r) => r,
@@ -258,8 +270,8 @@ impl SubagentPool {
     /// immediately. The caller's turn continues; completion lands in
     /// `tracker::take_completions()` for the UI to surface (notice +
     /// follow-up turn, like background bash tasks). Cancel via
-    /// `tracker::cancel_run` (`x` in /agents). Times out via
-    /// `tracker::subagent_timeout()`.
+    /// `tracker::cancel_run` (`x` in /agents). Opt-in timeout via
+    /// `tracker::subagent_timeout_opt()`.
     pub fn spawn_background(
         kind: SubagentKind,
         prompt: String,
@@ -292,7 +304,7 @@ impl SubagentPool {
             crate::subagent::tracker::set_run_parent(&run_id, parent_session);
         }
         let run_id_inner = run_id.clone();
-        let timeout = crate::subagent::tracker::subagent_timeout();
+        let timeout = crate::subagent::tracker::subagent_timeout_opt();
         let handle = tokio::spawn(async move {
             let Ok(_permit) = GLOBAL_SEM.acquire().await else {
                 crate::subagent::tracker::track_finish(
@@ -312,13 +324,7 @@ impl SubagentPool {
                 parent.model,
                 session_id,
             );
-            let res = match tokio::time::timeout(timeout, fut).await {
-                Ok(r) => r,
-                Err(_) => Err(anyhow::anyhow!(
-                    "subagent timed out after {}s (VIORAHARNESS_SUBAGENT_TIMEOUT_SECS)",
-                    timeout.as_secs()
-                )),
-            };
+            let res = await_subagent(fut, timeout).await;
             match &res {
                 Ok(text) => crate::subagent::tracker::track_finish(&run_id_inner, true, text),
                 Err(e) => {
@@ -416,7 +422,7 @@ impl SubagentPool {
         // Siblings share one depth (parent+1), not start-order inflation.
         let parent_allow = parent_mode_allow();
         let parent_mode = crate::mode::ModeGuard::current();
-        let timeout = crate::subagent::tracker::subagent_timeout();
+        let timeout = crate::subagent::tracker::subagent_timeout_opt();
         let mut handles = Vec::new();
         for (kind, prompt) in jobs {
             let sem = self.sem.clone();
@@ -444,13 +450,7 @@ impl SubagentPool {
                     None,
                     session_id,
                 );
-                let res = match tokio::time::timeout(timeout, fut).await {
-                    Ok(r) => r,
-                    Err(_) => Err(anyhow::anyhow!(
-                        "subagent timed out after {}s (VIORAHARNESS_SUBAGENT_TIMEOUT_SECS)",
-                        timeout.as_secs()
-                    )),
-                };
+                let res = await_subagent(fut, timeout).await;
                 match &res {
                     Ok(text) => crate::subagent::tracker::track_finish(&run_id, true, text),
                     Err(e) => {

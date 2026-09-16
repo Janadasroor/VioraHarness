@@ -121,17 +121,18 @@ fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Timeout for one subagent run, secs. Env override
-/// `VIORAHARNESS_SUBAGENT_TIMEOUT_SECS`, default 300 (5 min). Garbage or
-/// non-positive values fall back to the default (fail-closed, never 0).
-pub fn subagent_timeout() -> std::time::Duration {
-    let dflt = 300u64;
+/// Timeout for one subagent run, if any. Env override
+/// `VIORAHARNESS_SUBAGENT_TIMEOUT_SECS` is opt-in: a positive integer
+/// bounds the run, anything else (unset, garbage, 0) means no timeout —
+/// subagents run unbounded like opencode/Claude Code. Backstops remain:
+/// the 20-turn loop budget plus per-tool timeouts (bash 120s, chrome
+/// 60s), and `x` in /agents cancels any run.
+pub fn subagent_timeout_opt() -> Option<std::time::Duration> {
     let secs = std::env::var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .filter(|s| *s > 0)
-        .unwrap_or(dflt);
-    std::time::Duration::from_secs(secs)
+        .filter(|s| *s > 0)?;
+    Some(std::time::Duration::from_secs(secs))
 }
 
 /// On-disk log for a run, mirroring background-task logs
@@ -794,11 +795,17 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS").ok();
         std::env::set_var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS", "7");
-        assert_eq!(subagent_timeout(), std::time::Duration::from_secs(7));
+        assert_eq!(
+            subagent_timeout_opt(),
+            Some(std::time::Duration::from_secs(7))
+        );
+        // No timeout by default — matches opencode/Claude Code behavior.
+        std::env::remove_var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS");
+        assert_eq!(subagent_timeout_opt(), None);
         std::env::set_var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS", "garbage");
-        assert_eq!(subagent_timeout(), std::time::Duration::from_secs(300));
+        assert_eq!(subagent_timeout_opt(), None);
         std::env::set_var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS", "0");
-        assert_eq!(subagent_timeout(), std::time::Duration::from_secs(300));
+        assert_eq!(subagent_timeout_opt(), None);
         match prev {
             Some(v) => std::env::set_var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS", v),
             None => std::env::remove_var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS"),
