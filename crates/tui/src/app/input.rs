@@ -374,7 +374,7 @@ impl InputState {
             ("/exit", "alias for /quit"),
             ("/permissions", "show permissions"),
             ("/tasks", "background tasks — list, logs, kill"),
-            ("/agents", "live agents — turn, subagents, tasks, chats"),
+            ("/agents", "live agents — turn, subagents, tasks"),
             ("/errors", "error log — list, full text, clear"),
             ("/perms", "alias for /permissions"),
             ("/diff", "show last diff"),

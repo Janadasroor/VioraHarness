@@ -1,19 +1,19 @@
 //! `/agents` dialog: every active agent in one place with navigation.
 //!
 //! Rows are flat (one cursor across sections, like the Tasks panel):
-//! the live turn first, then this chat's subagent runs (active first), then
-//! background tasks (running first), then recent chats. Enter acts
-//! contextually: live closes, a linked subagent opens its transcript
-//! session (its own view, live or finished — running transcripts are
-//! read-only), task jumps to the Tasks panel focused on it, chat resumes
-//! it. Unlinked legacy rows fall back to a detail post.
+//! the live turn first, then this chat's subagent runs (active first),
+//! then background tasks (running first). Enter acts contextually:
+//! live closes, a linked subagent opens its transcript session (its own
+//! view, live or finished — running transcripts are read-only), task
+//! jumps to the Tasks panel focused on it. Unlinked legacy rows fall
+//! back to a detail post. Chats live in `/sessions` — this dialog stays
+//! scoped to the current chat so old explore sessions never crowd it.
 //! Selection is id-anchored (`AgentRow::row_id`): the list re-sorts on
 //! every rebuild, so a bare index could land on another row by Enter
 //! time. Main chat also announces each launch with its title
 //! (`poll_subagent_starts`, every event-loop tick).
 
 use super::*;
-use vioraharness_core::session::store::StoredSession;
 use vioraharness_core::subagent::tracker::{self, SubagentRun};
 use vioraharness_core::tools::tasks::{self, BgStatus, BgTask};
 
@@ -22,7 +22,6 @@ pub(crate) enum AgentRow {
     Live,
     Subagent(SubagentRun),
     Task(BgTask),
-    Chat(StoredSession),
 }
 
 impl AgentRow {
@@ -35,16 +34,17 @@ impl AgentRow {
             AgentRow::Live => "live".to_string(),
             AgentRow::Subagent(run) => format!("sa:{}", run.id),
             AgentRow::Task(t) => format!("task:{}", t.id),
-            AgentRow::Chat(s) => format!("chat:{}", s.id),
         }
     }
 }
 
 /// Flattened selectable rows: live turn, this chat's subagents (active
-/// first), background tasks (running first), recent chats (8). The
-/// subagent section is scoped to the current chat (or the originating
-/// chat while peeking at a transcript) via each run's parent link —
-/// other chats' runs never crowd this dialog.
+/// first), background tasks (running first). The subagent section is
+/// scoped to the current chat (or the originating chat while peeking at
+/// a transcript) via each run's parent link — other chats' runs never
+/// crowd this dialog. Recent chats are intentionally excluded (use
+/// `/sessions`); that section is what made repeated explore sessions
+/// look like agent spam.
 pub(crate) fn agent_rows(app: &App) -> Vec<AgentRow> {
     let mut rows = vec![AgentRow::Live];
     let scope = app.agents_scope_session();
@@ -57,19 +57,7 @@ pub(crate) fn agent_rows(app: &App) -> Vec<AgentRow> {
     let mut bg = tasks::list_tasks();
     bg.sort_by_key(|t| t.status != BgStatus::Running);
     rows.extend(bg.into_iter().map(AgentRow::Task));
-    rows.extend(recent_chats(app, 8).into_iter().map(AgentRow::Chat));
     rows
-}
-
-fn recent_chats(app: &App, limit: usize) -> Vec<StoredSession> {
-    let db = std::env::var("VIORAHARNESS_DB")
-        .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
-    vioraharness_core::session::SessionStore::new(&db)
-        .and_then(|s| {
-            s.list_sessions_filtered(app.session_scope_filter().as_deref(), None, true, 50, 0)
-        })
-        .map(|all| all.into_iter().take(limit).collect())
-        .unwrap_or_default()
 }
 
 pub(crate) fn age_str(secs: i64) -> String {
@@ -444,16 +432,6 @@ impl App {
                 }
                 self.popup = Popup::Tasks;
             }
-            AgentRow::Chat(sess) => {
-                if sess.id == self.session_id {
-                    self.popup = Popup::None;
-                    self.status = "already on this chat".into();
-                } else {
-                    self.return_session = None;
-                    self.resume_chat(&sess.id);
-                    self.popup = Popup::None;
-                }
-            }
         }
     }
 
@@ -675,51 +653,6 @@ mod tests {
         app.anchor_agent_cursor();
         app.agents_kill();
         assert!(app.status.contains("x only kills"), "{}", app.status);
-    }
-
-    #[test]
-    fn chat_enter_resumes_other_session() {
-        let (_env, db) = agents_env("resume");
-        let _clock = completion_lock();
-        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
-        store
-            .create_session("sess-ag-a", "model-a", Some("Alpha"))
-            .unwrap();
-        store
-            .create_session("sess-ag-b", "model-b", Some("Beta"))
-            .unwrap();
-        let mut app = test_app();
-        app.session_id = "sess-ag-a".into();
-        app.popup = Popup::Agents;
-        // Parallel tests can spawn subagents/tasks between the snapshot and
-        // activation, shifting indices — resolve + verify in a retry loop.
-        let mut resumed = false;
-        for _ in 0..20 {
-            let rows = agent_rows(&app);
-            let Some(pos) = rows
-                .iter()
-                .position(|r| matches!(r, AgentRow::Chat(s) if s.id == "sess-ag-b"))
-            else {
-                continue;
-            };
-            app.agent_cursor = pos;
-            app.anchor_agent_cursor();
-            app.session_id = "sess-ag-a".into();
-            app.popup = Popup::Agents;
-            app.agents_activate();
-            if app.session_id == "sess-ag-b" {
-                resumed = true;
-                break;
-            }
-        }
-        assert!(resumed, "Enter resumes sess-ag-b");
-        assert_eq!(app.session_id, "sess-ag-b");
-        assert_eq!(app.model, "model-b");
-        assert_eq!(app.popup, Popup::None);
-        assert!(
-            app.messages.iter().any(|m| m.content.contains("Resumed")),
-            "resume notice"
-        );
     }
 
     #[tokio::test]
@@ -1150,5 +1083,43 @@ mod tests {
         tracker::track_finish(&mine, true, "done");
         tracker::track_finish(&theirs, true, "done");
         let _ = tracker::take_completions();
+    }
+
+    #[test]
+    fn dialog_excludes_recent_chats() {
+        // Regression for "why i see all of these": repeated explore
+        // sessions in the same project used to fill /agents with 8 chat
+        // rows. Chats live in /sessions now — this dialog is live +
+        // this chat's subagents + tasks only.
+        let (_env, db) = agents_env("nochats");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        for i in 0..3 {
+            store
+                .create_session(
+                    &format!("sess-chat-{i}"),
+                    "m",
+                    Some("Running Subagent To Explore"),
+                )
+                .unwrap();
+        }
+        let mut app = test_app();
+        app.session_id = "sess-chat-0".into();
+        let rows = agent_rows(&app);
+        assert!(matches!(rows[0], AgentRow::Live), "live first");
+        assert!(
+            rows.iter().all(|r| matches!(
+                r,
+                AgentRow::Live | AgentRow::Subagent(_) | AgentRow::Task(_)
+            )),
+            "no chat rows: {rows:?}"
+        );
+        app.popup = Popup::Agents;
+        let text = render_text(&mut app, 100, 30);
+        assert!(!text.contains("chat ·"), "no chat rows rendered: {text:?}");
+        assert!(
+            text.contains("subagents •"),
+            "header without chats section: {text:?}"
+        );
     }
 }

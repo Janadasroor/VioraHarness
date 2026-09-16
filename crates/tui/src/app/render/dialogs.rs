@@ -27,7 +27,7 @@ impl App {
                 Popup::ToolOutput => " Tool Output — Full ",
                 Popup::Skills => " Skills — auto-loaded on intent ",
                 Popup::Tasks => " Background Tasks ",
-                Popup::Agents => " Agents — live, subagents, tasks, chats ",
+                Popup::Agents => " Agents — live, subagents, tasks ",
                 Popup::Errors => " Errors ",
                 Popup::Rewind => " Rewind — restore checkpoint ",
                 Popup::Settings => " Settings ",
@@ -76,7 +76,7 @@ impl App {
                 Line::from("  /compact   summarize + squash history (auto at 80%)"),
                 Line::from("  /output    view last tool output (bash very long, F9)"),
                 Line::from("  /tasks     background tasks — list, logs, kill (bash background:true)"),
-                Line::from("  /agents    live agents — turn, subagents, tasks, chats (navigate)"),
+                Line::from("  /agents    live agents — turn, subagents, tasks (navigate, /sessions for chats)"),
                 Line::from("  /errors    error log — list, full text, clear"),
                 Line::from("  /skills    list skills • /skill-new [--local] <what it should do> (AI writes it)"),
                 Line::from("  /quit /q /exit  quit"),
@@ -912,14 +912,10 @@ impl App {
                     .iter()
                     .filter(|r| matches!(r, AgentRow::Task(_)))
                     .count();
-                let chat_total = rows
-                    .iter()
-                    .filter(|r| matches!(r, AgentRow::Chat(_)))
-                    .count();
                 let live_state = if self.busy { "busy" } else { "ready" };
                 let mut lines: Vec<Line> = Vec::new();
                 lines.push(Line::from(vec![Span::styled(
-                    format!(" ▶ live ({live_state}) • {sub_active}/{sub_total} subagents • {task_running}/{task_total} tasks • {chat_total} chats "),
+                    format!(" ▶ live ({live_state}) • {sub_active}/{sub_total} subagents • {task_running}/{task_total} tasks "),
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 )]));
                 let inner_h = inner.height as usize;
@@ -1019,29 +1015,14 @@ impl App {
                             );
                             agents_line(star, icon, col, &text, w, is_selected, style)
                         }
-                        AgentRow::Chat(sess) => {
-                            let marker = if sess.id == self.session_id {
-                                ("●", Color::Green)
-                            } else {
-                                ("○", Color::DarkGray)
-                            };
-                            let title = sess
-                                .title
-                                .as_deref()
-                                .filter(|t| !t.trim().is_empty())
-                                .unwrap_or("(untitled)");
-                            let model_short =
-                                sess.model.split('/').next_back().unwrap_or(&sess.model);
-                            let text = format!(
-                                "chat · {} · {} · {}",
-                                truncate_to_width(title, 30),
-                                truncate_to_width(model_short, 22),
-                                &sess.id[..8.min(sess.id.len())],
-                            );
-                            agents_line(star, marker.0, marker.1, &text, w, is_selected, style)
-                        }
                     };
                     lines.push(line);
+                }
+                if rows.len() == 1 {
+                    lines.push(Line::from(Span::styled(
+                        " no subagents or tasks — /sessions for chats ",
+                        Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
+                    )));
                 }
                 if total > visible {
                     lines.push(Line::from(Span::styled(
