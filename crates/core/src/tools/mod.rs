@@ -768,13 +768,18 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
                 .map(|s| s.to_string());
             // Parent context injected by the loop (see loop/mod.rs): depth
             // for tracker labels + recursion guard, model as offline
-            // fallback behind explicit `model:` and SUBAGENT_MODEL env.
+            // fallback behind explicit `model:` and SUBAGENT_MODEL env,
+            // session_id tagging the spawning chat for per-chat /agents.
             let parent_depth = args
                 .get("parent_depth")
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
             let parent_model = args
                 .get("parent_model")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let parent_session = args
+                .get("session_id")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
             if prompt.is_empty() {
@@ -787,6 +792,7 @@ pub async fn execute_tool(name: &str, args: Value) -> Value {
             let parent = crate::subagent::pool::ParentCtx {
                 depth: parent_depth,
                 model: parent_model,
+                session: parent_session,
             };
             if args
                 .get("background")

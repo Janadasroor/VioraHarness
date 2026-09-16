@@ -71,6 +71,10 @@ pub struct SubagentRun {
     /// view instead of a summary buried in main chat. `None` for rows
     /// from before the link existed.
     pub session_id: Option<String>,
+    /// Chat session that spawned this run (the `task` tool caller's
+    /// `session_id`). The /agents dialog lists only the current chat's
+    /// runs; `None` for rows from before the link existed (hidden there).
+    pub parent_session: Option<String>,
     /// Completion already surfaced (TUI notice / follow-up turn).
     pub notified: bool,
 }
@@ -175,13 +179,19 @@ pub(crate) const SUBAGENT_TABLE_SQL: &str = "CREATE TABLE IF NOT EXISTS subagent
     result_truncated INTEGER NOT NULL DEFAULT 0,
     log_path TEXT,
     notified INTEGER NOT NULL DEFAULT 0,
-    session_id TEXT
+    session_id TEXT,
+    parent_session TEXT
 );";
 
 /// ALTER for DBs created before the session link existed. Best-effort:
 /// duplicate-column on re-run is ignored by the caller.
 pub(crate) const SUBAGENT_COLUMN_SESSION: &str =
     "ALTER TABLE subagent_runs ADD COLUMN session_id TEXT";
+
+/// ALTER for DBs created before the parent-chat link existed. Same
+/// best-effort contract as the session column above.
+pub(crate) const SUBAGENT_COLUMN_PARENT: &str =
+    "ALTER TABLE subagent_runs ADD COLUMN parent_session TEXT";
 
 /// Kill-switch: `VIORAHARNESS_SUBAGENT_PERSIST=0/off/false/no` disables all
 /// sqlite I/O (in-memory only). Anything else (unset included) persists.
@@ -242,6 +252,7 @@ fn open_db(path: &str) -> Option<rusqlite::Connection> {
     let _ = conn.execute_batch("PRAGMA busy_timeout=5000;");
     let _ = conn.execute_batch(SUBAGENT_TABLE_SQL);
     let _ = conn.execute(SUBAGENT_COLUMN_SESSION, []);
+    let _ = conn.execute(SUBAGENT_COLUMN_PARENT, []);
     Some(conn)
 }
 
@@ -258,8 +269,8 @@ fn persist_run(run: &SubagentRun) {
         "INSERT OR REPLACE INTO subagent_runs
          (id, kind, prompt_preview, full_prompt, mode, depth, started_at,
           finished_at, status, result_preview, result_full, result_truncated,
-          log_path, notified, session_id)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
+          log_path, notified, session_id, parent_session)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
         rusqlite::params![
             run.id,
             run.kind,
@@ -276,6 +287,7 @@ fn persist_run(run: &SubagentRun) {
             run.log_path,
             run.notified as i32,
             run.session_id,
+            run.parent_session,
         ],
     );
     let _ = conn.execute(
@@ -328,7 +340,7 @@ fn hydrate_runs() {
             .prepare(
                 "SELECT id, kind, prompt_preview, full_prompt, mode, depth, started_at,
                     finished_at, status, result_preview, result_full,
-                    result_truncated, log_path, notified, session_id
+                    result_truncated, log_path, notified, session_id, parent_session
              FROM subagent_runs ORDER BY started_at DESC LIMIT ?1",
             )
             .ok()?;
@@ -353,6 +365,7 @@ fn hydrate_runs() {
                     log_path: row.get(12)?,
                     notified: row.get::<_, i64>(13).unwrap_or(0) != 0,
                     session_id: row.get(14).unwrap_or(None),
+                    parent_session: row.get(15).unwrap_or(None),
                 })
             })
             .ok()?;
@@ -448,6 +461,7 @@ fn track_start_inner(
         result_truncated: false,
         log_path: None,
         session_id: None,
+        parent_session: None,
         notified: false,
     });
     while runs.len() > MAX_KEPT {
@@ -563,6 +577,21 @@ pub fn set_run_session(id: &str, session_id: &str) {
             return;
         };
         run.session_id = Some(session_id.to_string());
+    }
+    persist_snapshot(id);
+}
+
+/// Link a run to the chat session that spawned it (pool internal, right
+/// after spawn, from the `task` tool's injected `session_id`). The
+/// /agents dialog lists only the current chat's runs. Same write-through
+/// contract as the transcript link above.
+pub fn set_run_parent(id: &str, parent_session: &str) {
+    {
+        let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(run) = runs.iter_mut().rev().find(|r| r.id == id) else {
+            return;
+        };
+        run.parent_session = Some(parent_session.to_string());
     }
     persist_snapshot(id);
 }
@@ -910,6 +939,31 @@ mod tests {
         assert_eq!(stored.as_deref(), Some("sub-sa_link9"));
         // Unknown ids never panic.
         set_run_session("sa_nonexistent", "sub-nope");
+        track_finish(&id, true, "done");
+        let _ = take_completions();
+    }
+
+    #[test]
+    fn parent_link_persists_with_row() {
+        let env = persist_env("parent");
+        let (id, _) = track_start_at_depth("explore", &unique_prompt("par"), "eda", 1);
+        set_run_parent(&id, "sess-parent9");
+        let run = list_runs()
+            .into_iter()
+            .find(|r| r.id == id)
+            .expect("run listed");
+        assert_eq!(run.parent_session.as_deref(), Some("sess-parent9"));
+        let conn = rusqlite::Connection::open(&env.path).expect("temp db opens");
+        let stored: Option<String> = conn
+            .query_row(
+                "SELECT parent_session FROM subagent_runs WHERE id = ?1",
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .expect("parent persisted");
+        assert_eq!(stored.as_deref(), Some("sess-parent9"));
+        // Unknown ids never panic.
+        set_run_parent("sa_nonexistent", "sess-nope");
         track_finish(&id, true, "done");
         let _ = take_completions();
     }

@@ -135,13 +135,15 @@ fn parent_mode_allow() -> Option<Vec<String>> {
 static GLOBAL_SEM: std::sync::LazyLock<Semaphore> = std::sync::LazyLock::new(|| Semaphore::new(4));
 
 /// Parent context captured at the `task` call site (the loop injects
-/// `parent_depth`/`parent_model` into the tool args; direct callers use
-/// depth 0 / no model). Depth drives both the tracker label and the
-/// loop's `task recursion depth exceeded` guard.
+/// `parent_depth`/`parent_model`/`session_id` into the tool args; direct
+/// callers use depth 0 / no model / no session). Depth drives both the
+/// tracker label and the loop's `task recursion depth exceeded` guard;
+/// the session tags the spawning chat so /agents can scope runs per chat.
 #[derive(Debug, Clone, Default)]
 pub struct ParentCtx {
     pub depth: usize,
     pub model: Option<String>,
+    pub session: Option<String>,
 }
 
 pub struct SubagentPool {
@@ -209,8 +211,12 @@ impl SubagentPool {
         );
         // The transcript lives in its own session (`sub-<run id>`): Enter
         // on the finished run opens that session as the subagent's view.
+        // The spawning chat is tagged too so /agents can scope runs per chat.
         let session_id = format!("{}{}", crate::subagent::tracker::SUB_SESSION_PREFIX, run_id);
         crate::subagent::tracker::set_run_session(&run_id, &session_id);
+        if let Some(parent_session) = parent.session.as_deref() {
+            crate::subagent::tracker::set_run_parent(&run_id, parent_session);
+        }
         let timeout = crate::subagent::tracker::subagent_timeout();
         let fut = Self::execute(
             kind,
@@ -262,7 +268,7 @@ impl SubagentPool {
         Self::spawn_background_full(kind, prompt, model_override, ParentCtx::default())
     }
 
-    /// Detached spawn with parent depth/model (the `task` tool path).
+    /// Detached spawn with parent depth/model/session (the `task` tool path).
     pub fn spawn_background_full(
         kind: SubagentKind,
         prompt: String,
@@ -282,6 +288,9 @@ impl SubagentPool {
         );
         let session_id = format!("{}{}", crate::subagent::tracker::SUB_SESSION_PREFIX, run_id);
         crate::subagent::tracker::set_run_session(&run_id, &session_id);
+        if let Some(parent_session) = parent.session.as_deref() {
+            crate::subagent::tracker::set_run_parent(&run_id, parent_session);
+        }
         let run_id_inner = run_id.clone();
         let timeout = crate::subagent::tracker::subagent_timeout();
         let handle = tokio::spawn(async move {

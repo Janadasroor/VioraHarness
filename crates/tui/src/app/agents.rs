@@ -1,7 +1,7 @@
 //! `/agents` dialog: every active agent in one place with navigation.
 //!
 //! Rows are flat (one cursor across sections, like the Tasks panel):
-//! the live turn first, then subagent runs (active first), then
+//! the live turn first, then this chat's subagent runs (active first), then
 //! background tasks (running first), then recent chats. Enter acts
 //! contextually: live closes, a linked subagent opens its transcript
 //! session (its own view, live or finished — running transcripts are
@@ -40,11 +40,18 @@ impl AgentRow {
     }
 }
 
-/// Flattened selectable rows: live turn, subagents (active first),
-/// background tasks (running first), recent chats (8).
+/// Flattened selectable rows: live turn, this chat's subagents (active
+/// first), background tasks (running first), recent chats (8). The
+/// subagent section is scoped to the current chat (or the originating
+/// chat while peeking at a transcript) via each run's parent link —
+/// other chats' runs never crowd this dialog.
 pub(crate) fn agent_rows(app: &App) -> Vec<AgentRow> {
     let mut rows = vec![AgentRow::Live];
-    let mut runs = tracker::list_runs();
+    let scope = app.agents_scope_session();
+    let mut runs: Vec<_> = tracker::list_runs()
+        .into_iter()
+        .filter(|r| r.parent_session.as_deref() == Some(scope))
+        .collect();
     runs.sort_by_key(|r| r.status != tracker::SubagentStatus::Running);
     rows.extend(runs.into_iter().map(AgentRow::Subagent));
     let mut bg = tasks::list_tasks();
@@ -338,6 +345,17 @@ impl App {
         self.session_id.starts_with(tracker::SUB_SESSION_PREFIX)
     }
 
+    /// Chat whose subagents the /agents dialog lists: the current chat,
+    /// or the originating chat while peeking at a subagent transcript
+    /// (so the dialog stays useful instead of going empty mid-peek).
+    pub(crate) fn agents_scope_session(&self) -> &str {
+        if self.viewing_subagent() {
+            self.return_session.as_deref().unwrap_or(&self.session_id)
+        } else {
+            &self.session_id
+        }
+    }
+
     /// Live-refresh the open subagent transcript (called every event-loop
     /// tick). The view loads once on Enter, but a running subagent keeps
     /// appending to its session in the store — without this the view looks
@@ -560,6 +578,7 @@ mod tests {
         let prompt = unique_prompt("rows");
         let (id, _) = tracker::track_start("explore", &prompt, "eda");
         let mut app = test_app();
+        tracker::set_run_parent(&id, &app.session_id);
         let rows = agent_rows(&app);
         assert!(matches!(rows[0], AgentRow::Live), "live turn first");
         let pos = rows
@@ -584,6 +603,7 @@ mod tests {
         let (id, _) = tracker::track_start("reviewer", &prompt, "web");
         tracker::track_finish(&id, true, "looks good");
         let mut app = test_app();
+        tracker::set_run_parent(&id, &app.session_id);
         app.popup = Popup::Agents;
         // Rows rebuild inside activate; a concurrent spawn from another
         // test can shift indices between snapshot and use — verify.
@@ -719,6 +739,7 @@ mod tests {
         tracker::set_run_session(&id, "sub-sa_live1");
         let mut app = test_app();
         app.session_id = "sess-main".into();
+        tracker::set_run_parent(&id, "sess-main");
         app.popup = Popup::Agents;
         let rows = agent_rows(&app);
         app.agent_cursor = rows
@@ -809,6 +830,7 @@ mod tests {
         tracker::track_finish(&id, true, "done");
         let _ = tracker::take_completions();
         let mut app = test_app();
+        tracker::set_run_parent(&id, &app.session_id);
         app.popup = Popup::Agents;
         let rows = agent_rows(&app);
         app.agent_cursor = rows
@@ -830,6 +852,7 @@ mod tests {
         let prompt = unique_prompt("anchored");
         let (id, _) = tracker::track_start("explore", &prompt, "eda");
         let mut app = test_app();
+        tracker::set_run_parent(&id, &app.session_id);
         app.popup = Popup::Agents;
         let rows = agent_rows(&app);
         app.agent_cursor = rows
@@ -871,6 +894,7 @@ mod tests {
         let _ = tracker::take_completions();
         let mut app = test_app();
         app.session_id = "sess-main".into();
+        tracker::set_run_parent(&id, "sess-main");
         app.popup = Popup::Agents;
         let rows = agent_rows(&app);
         app.agent_cursor = rows
@@ -1081,6 +1105,50 @@ mod tests {
         assert!(app.status.contains("Esc back to main"), "{}", app.status);
         app.subview_last_refresh = past();
         assert!(!app.poll_subview_refresh(), "quiet once finalized");
+        let _ = tracker::take_completions();
+    }
+
+    #[test]
+    fn dialog_lists_only_current_chat_subagents() {
+        // /agents is per-chat: runs spawned by other chats (or from
+        // before the parent link existed) never crowd the list. While
+        // peeking at a transcript the scope is the originating chat.
+        let _lock = completion_lock();
+        let (mine, _) = tracker::track_start("explore", &unique_prompt("mine"), "eda");
+        let (theirs, _) = tracker::track_start("coder", &unique_prompt("theirs"), "eda");
+        let (legacy, _) = tracker::track_start("reviewer", &unique_prompt("legacy"), "eda");
+        tracker::track_finish(&legacy, true, "old");
+        let mut app = test_app();
+        app.session_id = "sess-home-chat".into();
+        tracker::set_run_parent(&mine, "sess-home-chat");
+        tracker::set_run_parent(&theirs, "sess-other-chat");
+        let rows = agent_rows(&app);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, AgentRow::Subagent(run) if run.id == mine)),
+            "own run listed"
+        );
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r, AgentRow::Subagent(run) if run.id == theirs)),
+            "other chat's run hidden"
+        );
+        assert!(
+            rows.iter()
+                .all(|r| !matches!(r, AgentRow::Subagent(run) if run.id == legacy)),
+            "unattributed legacy run hidden"
+        );
+        // Peeking at a transcript scopes to the chat we came from.
+        app.session_id = "sub-sa_peek1".into();
+        app.return_session = Some("sess-home-chat".into());
+        let rows = agent_rows(&app);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, AgentRow::Subagent(run) if run.id == mine)),
+            "originating chat's runs visible mid-peek"
+        );
+        tracker::track_finish(&mine, true, "done");
+        tracker::track_finish(&theirs, true, "done");
         let _ = tracker::take_completions();
     }
 }
