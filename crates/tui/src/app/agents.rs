@@ -82,6 +82,13 @@ impl App {
     /// event-loop iteration; each completion drains once. Returns the
     /// waked run ids.
     pub(crate) fn poll_subagent_completions(&mut self) -> Vec<String> {
+        // Subagent transcript views are read-only peeks: never drain the
+        // global completion queue here. Draining marks runs surfaced, so
+        // the main chat would lose its finish notice + follow-up turn.
+        // Completions wait until Esc returns to the main session.
+        if self.viewing_subagent() {
+            return Vec::new();
+        }
         let mut waked = Vec::new();
         for done in tracker::take_completions() {
             let (mark, urgent) = match done.status {
@@ -301,6 +308,11 @@ impl App {
     /// never announced: only runs started after boot qualify, and each
     /// id announces once.
     pub(crate) fn poll_subagent_starts(&mut self) {
+        // Read-only peek: launch announcements belong to the main chat.
+        // Posting them here would pollute the transcript being viewed.
+        if self.viewing_subagent() {
+            return;
+        }
         for run in tracker::list_runs() {
             if run.started_at < self.booted_at {
                 continue;
@@ -928,5 +940,51 @@ mod tests {
         app.start_turn("follow up".into(), None, "user");
         assert!(!app.busy, "turns refused after finish too");
         let _ = tracker::take_completions();
+    }
+
+    #[test]
+    fn subview_defers_completions_and_launches_to_main() {
+        // Regression for the "messy texts" report: peeking at a subagent
+        // transcript while a run finishes must not drain the global queues
+        // into the peeked view (draining marks runs surfaced, so the main
+        // chat would lose its notice + follow-up turn, and the notice text
+        // would mix two transcripts on one screen).
+        let _lock = completion_lock();
+        let prompt = unique_prompt("defer");
+        let (id, _) = tracker::track_start("explore", &prompt, "eda");
+        tracker::track_finish(&id, true, "deferred result");
+        let mut app = test_app();
+        app.booted_at = 0;
+        let before = app.messages.len();
+        app.session_id = "sub-sa_defer1".into();
+        assert!(app.viewing_subagent(), "peek is read-only");
+        let waked = app.poll_subagent_completions();
+        assert!(waked.is_empty(), "no wake from a transcript peek");
+        assert_eq!(app.messages.len(), before, "no notice in sub view");
+        app.poll_subagent_starts();
+        assert_eq!(app.messages.len(), before, "no launch noise in sub view");
+        // Still queued for the main chat — deferred, not lost.
+        let pending = tracker::take_completions();
+        assert!(
+            pending.iter().any(|r| r.id == id),
+            "completion survives the peek"
+        );
+    }
+
+    #[test]
+    fn subview_refuses_system_turns_too() {
+        // Follow-up wakes (task/subagent completions) must wait for the
+        // return to main: starting one here would persist main-chat
+        // content into the sub session.
+        let mut app = test_app();
+        app.session_id = "sub-sa_sysref1".into();
+        assert!(app.viewing_subagent());
+        app.start_turn("wake".into(), None, "system");
+        assert!(!app.busy, "no system turn in sub view");
+        assert!(app.pending.is_none(), "nothing spawned");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("read-only")),
+            "refusal explained"
+        );
     }
 }

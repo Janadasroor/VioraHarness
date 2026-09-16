@@ -108,15 +108,17 @@ impl App {
         image: Option<(String, String)>,
         prompt_role: &'static str,
     ) {
-        // A subagent transcript never takes user turns: only the main
-        // agent owns the input box. Holds after finish too. System turns
-        // (task wakes) still pass.
-        if prompt_role == "user" && self.viewing_subagent() {
+        // A subagent transcript never takes turns — user or system:
+        // only the main agent owns the input box, and follow-up wakes
+        // (task/subagent completions) must wait for the return to main.
+        // Starting one here would persist main-chat content into the sub
+        // session and mix both transcripts on screen. Holds after finish.
+        if self.viewing_subagent() {
             self.messages.push(Msg::new(
                 "system",
                 "subagent view is read-only — Esc back to main to chat".to_string(),
             ));
-            self.status = "read-only: subagent view".into();
+            self.status = "read-only: subagent view (Esc back to main)".into();
             self.scroll = 0;
             return;
         }

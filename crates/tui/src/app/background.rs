@@ -3,6 +3,13 @@ use super::*;
 impl App {
     pub(crate) fn poll_task_completions(&mut self) -> Vec<String> {
         use vioraharness_core::tools::tasks::BgStatus;
+        // Same read-only rule as subagent completions: a transcript peek
+        // must not drain the global task queue (draining marks surfaced)
+        // nor persist notices into the sub session. Everything waits for
+        // the return to the main chat.
+        if self.viewing_subagent() {
+            return Vec::new();
+        }
         let mut waked = Vec::new();
         for done in vioraharness_core::tools::tasks::take_completions() {
             let (mark, detail) = match done.status {
@@ -207,7 +214,12 @@ impl App {
         let Some(inj) = self.instant_injector.take() else {
             return 0;
         };
-        self.turn_session = None;
+        // Leftovers belong to the finished turn's session, not whatever
+        // view is open now (a mid-turn peek must not re-tag them).
+        let owner = self
+            .turn_session
+            .take()
+            .unwrap_or_else(|| self.session_id.clone());
         let leftovers = inj.drain();
         let n = leftovers.len();
         // Reverse-insert so the oldest leftover ends up at the head.
@@ -215,7 +227,7 @@ impl App {
             self.queued_prompts.insert(
                 0,
                 QueuedPrompt {
-                    session_id: self.session_id.clone(),
+                    session_id: owner.clone(),
                     send,
                     image: None,
                     slash: false,
@@ -234,6 +246,12 @@ impl App {
     /// turn and the rest wait for the next idle drain.
     pub(crate) fn drain_queue(&mut self) {
         if self.busy || self.pending.is_some() || self.model.trim().is_empty() {
+            return;
+        }
+        // Read-only peek: queued prompts belong to the main chat. Draining
+        // here would echo main-chat prompts into the transcript view and
+        // start main turns under the sub session. Wait for Esc.
+        if self.viewing_subagent() {
             return;
         }
         loop {

@@ -1735,20 +1735,36 @@ impl App {
             if let Some(rx) = &mut self.stream_rx {
                 let td_map = self.tool_display.clone();
                 let td_default = self.tool_display_default.clone();
+                // A live turn belongs to the session that started it. If the
+                // user peeked at another chat (e.g. a subagent transcript)
+                // mid-turn, stream events must not mutate this view: the
+                // core loop already persists everything under the turn's own
+                // session, and the view reloads from the store on return.
+                // Drain without applying so a stale turn can never mix two
+                // transcripts on screen (the reported "messy texts").
+                let live_turn = self
+                    .turn_session
+                    .as_deref()
+                    .map(|ts| ts == self.session_id)
+                    .unwrap_or(true);
                 let mut stream_dirty = false;
                 while let Ok(ev) = rx.try_recv() {
                     stream_dirty = true;
                     match ev {
                         vioraharness_core::provider::ProviderEvent::TextDelta(t) => {
-                            self.streaming_buf.push_str(&t);
+                            if live_turn {
+                                self.streaming_buf.push_str(&t);
+                            }
                         }
                         vioraharness_core::provider::ProviderEvent::ReasoningDelta(r) => {
-                            Self::accumulate_reasoning_delta(
-                                &mut self.thinking_buf,
-                                &mut self.status,
-                                self.show_thinking,
-                                &r,
-                            );
+                            if live_turn {
+                                Self::accumulate_reasoning_delta(
+                                    &mut self.thinking_buf,
+                                    &mut self.status,
+                                    self.show_thinking,
+                                    &r,
+                                );
+                            }
                         }
                         vioraharness_core::provider::ProviderEvent::ToolCallDelta {
                             id,
@@ -1756,6 +1772,9 @@ impl App {
                             args,
                             thought_signature: _,
                         } => {
+                            if !live_turn {
+                                continue;
+                            }
                             let verbosity = Self::verbosity_for(&td_map, &td_default, &name);
                             let pretty = pretty_tool_args_wide(
                                 &name,
@@ -1815,6 +1834,9 @@ impl App {
                             content,
                             ok,
                         } => {
+                            if !live_turn {
+                                continue;
+                            }
                             if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
                                 if let Some(d) = v.get("diff").and_then(|x| x.as_str()) {
                                     self.last_diff = Some(d.to_string());
@@ -1948,7 +1970,7 @@ impl App {
                                 }
                             }
                         }
-                        vioraharness_core::provider::ProviderEvent::Notice(msg) => {
+                        vioraharness_core::provider::ProviderEvent::Notice(msg) if live_turn => {
                             self.ctx_freed_tokens += Self::parse_compact_freed(&msg);
                             self.status = msg;
                         }
@@ -1966,39 +1988,65 @@ impl App {
                         let handle = self.pending.take().unwrap();
                         self.busy = false;
                         self.streaming_buf.clear();
+                        // Same session rule as streaming: a turn that
+                        // finished while the user peeked elsewhere must not
+                        // append its result to the viewed transcript. The
+                        // core loop persisted it under the turn's own
+                        // session; the view reloads on return.
+                        let live_finish = self
+                            .turn_session
+                            .as_deref()
+                            .map(|ts| ts == self.session_id)
+                            .unwrap_or(true);
                         match handle.await {
                             Ok(Ok(text)) => {
-                                let mut msg = Msg::new("assistant", text.clone());
+                                if live_finish {
+                                    let mut msg = Msg::new("assistant", text.clone());
 
-                                if !self.thinking_buf.trim().is_empty() {
-                                    msg.reasoning = Some(self.thinking_buf.clone());
+                                    if !self.thinking_buf.trim().is_empty() {
+                                        msg.reasoning = Some(self.thinking_buf.clone());
+                                    }
+                                    self.messages.push(msg);
+                                    self.status = "ready".into();
+                                    let preview: String = text
+                                        .lines()
+                                        .next()
+                                        .unwrap_or("")
+                                        .chars()
+                                        .take(160)
+                                        .collect();
+                                    if preview.trim().is_empty() {
+                                        self.notify("turn done", false);
+                                    } else {
+                                        self.notify(&format!("turn done — {preview}"), false);
+                                    }
                                 }
                                 self.thinking_buf.clear();
-                                self.messages.push(msg);
-                                self.status = "ready".into();
-                                let preview: String = text
-                                    .lines()
-                                    .next()
-                                    .unwrap_or("")
-                                    .chars()
-                                    .take(160)
-                                    .collect();
-                                if preview.trim().is_empty() {
-                                    self.notify("turn done", false);
-                                } else {
-                                    self.notify(&format!("turn done — {preview}"), false);
-                                }
                             }
                             Ok(Err(e)) => {
-                                self.report_error("turn", format!("error: {e:#}"));
-                                self.status = "error".into();
-                                let what: String = format!("{e:#}").chars().take(200).collect();
-                                self.notify(&format!("turn failed — {what}"), true);
+                                if live_finish {
+                                    self.report_error("turn", format!("error: {e:#}"));
+                                    self.status = "error".into();
+                                    let what: String = format!("{e:#}").chars().take(200).collect();
+                                    self.notify(&format!("turn failed — {what}"), true);
+                                } else {
+                                    let _ = vioraharness_core::observe::push_error(
+                                        "turn",
+                                        &format!("error: {e:#}"),
+                                    );
+                                }
                             }
                             Err(e) => {
-                                self.report_error("turn", format!("join error: {e}"));
-                                self.status = "error".into();
-                                self.notify("turn failed — join error", true);
+                                if live_finish {
+                                    self.report_error("turn", format!("join error: {e}"));
+                                    self.status = "error".into();
+                                    self.notify("turn failed — join error", true);
+                                } else {
+                                    let _ = vioraharness_core::observe::push_error(
+                                        "turn",
+                                        &format!("join error: {e}"),
+                                    );
+                                }
                             }
                         }
                     }
