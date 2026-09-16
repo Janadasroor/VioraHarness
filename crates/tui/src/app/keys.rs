@@ -53,6 +53,25 @@ impl App {
         false
     }
 
+    /// OS-signal shutdown check, polled by the event loop. A real SIGINT
+    /// bypasses the key handling above (raw mode turns ^C into a key
+    /// event, but a signal from another session — or after raw mode is
+    /// off — kills the process mid-alternate-screen by default). On the
+    /// flag, mark a clean quit so the normal restore path runs. Returns
+    /// true when the caller must break out now. Separated for tests.
+    pub(crate) fn check_sigint(
+        &mut self,
+        sigint: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> bool {
+        if sigint.load(std::sync::atomic::Ordering::SeqCst) {
+            self.confirm_armed = None;
+            self.status = "interrupted — shutting down".into();
+            self.should_quit = true;
+            return true;
+        }
+        false
+    }
+
     /// Bare Ctrl+C (no Ctrl+Alt): copy selection when there is one,
     /// otherwise the double-press quit path. Returns true when the caller
     /// must quit now. Extracted so the event loop and tests share it.
@@ -1094,6 +1113,18 @@ mod tests {
         assert!(!app.handle_ctrl_c(), "copies instead of quitting");
         assert!(!app.quit_armed(), "copying disarms");
         assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn sigint_flag_shuts_down_cleanly() {
+        let mut app = test_app();
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        assert!(!app.check_sigint(&flag), "unset flag is a no-op");
+        assert!(!app.should_quit);
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(app.check_sigint(&flag), "set flag breaks the loop");
+        assert!(app.should_quit, "clean quit flag set");
+        assert!(app.status.contains("shutting down"), "{}", app.status);
     }
 
     #[tokio::test]

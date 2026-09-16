@@ -1598,10 +1598,27 @@ impl App {
         {
             tracing::warn!("mouse capture unavailable: {e}");
         }
+        // OS-level SIGINT (a real Ctrl+C signal, not the crossterm key
+        // event): raw mode turns ^C into a keypress, but once the terminal
+        // is out of raw mode — or when the signal comes from another
+        // process/session — it arrives as a signal and the default action
+        // kills us mid-alternate-screen, leaving the shell garbled (the
+        // reported "tui crashed"). Flip a flag instead; the event loop
+        // below shuts down cleanly through the normal restore path.
+        let sigint = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let sigint_task = {
+            let sigint = sigint.clone();
+            tokio::spawn(async move {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    sigint.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            })
+        };
         // Window shows the chat title instead of the shell path.
         self.sync_terminal_title();
         let sid = self.session_id.clone();
-        let res = self.event_loop(&mut terminal, &input_rx).await;
+        let res = self.event_loop(&mut terminal, &input_rx, &sigint).await;
+        sigint_task.abort();
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
         Self::restore_terminal_title();
@@ -1618,11 +1635,15 @@ impl App {
         &mut self,
         terminal: &mut ratatui::DefaultTerminal,
         input_rx: &std::sync::mpsc::Receiver<Event>,
+        sigint: &std::sync::Arc<std::sync::atomic::AtomicBool>,
     ) -> anyhow::Result<()> {
         let mut last_draw = std::time::Instant::now();
         let mut dirty = true;
         loop {
             if self.should_quit {
+                break;
+            }
+            if self.check_sigint(sigint) {
                 break;
             }
 
