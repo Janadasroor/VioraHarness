@@ -128,15 +128,18 @@ impl Provider for OpenRouterProvider {
                 if !resp.status().is_success() {
                     let status = resp.status();
                     let text2 = resp.text().await.unwrap_or_default();
-                    anyhow::bail!("OpenRouter error {status} (after retry max_tokens={retry_tokens}): {text2}\nHint: add credits at https://openrouter.ai/settings/credits or pick a cheaper model via /model");
+                    let human = super::humanize_error_body(&text2, 300);
+                    anyhow::bail!("OpenRouter error {status} (after retry max_tokens={retry_tokens}): {human}\nHint: add credits at https://openrouter.ai/settings/credits or pick a cheaper model via /model");
                 }
             } else {
-                anyhow::bail!("OpenRouter error 402 Payment Required: {text}\nHint: add credits at https://openrouter.ai/settings/credits (current afford limit may be very low)");
+                let human = super::humanize_error_body(&text, 300);
+                anyhow::bail!("OpenRouter error 402 Payment Required: {human}\nHint: add credits at https://openrouter.ai/settings/credits (current afford limit may be very low)");
             }
         } else if !resp.status().is_success() {
             let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
-            anyhow::bail!("OpenRouter error {status}: {text}");
+            let human = super::humanize_error_body(&text, 300);
+            anyhow::bail!("OpenRouter error {status}: {human}");
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);

@@ -45,19 +45,20 @@ impl OpenCodeProvider {
                 let code = status
                     .map(|s| s.to_string())
                     .unwrap_or_else(|| "transport".into());
+                let human = super::super::humanize_error_body(&detail, 400);
                 if status == Some(401) || detail.contains("Invalid") || detail.contains("Auth") {
-                    anyhow::bail!("Gateway {} messages error {code}: {detail}\nHint: check OPENCODE_API_KEY at https://opencode.ai/auth", self.name());
+                    anyhow::bail!("Gateway {} messages error {code}: {human}\nHint: check OPENCODE_API_KEY at https://opencode.ai/auth", self.name());
                 }
                 if status == Some(429)
                     || detail.to_lowercase().contains("rate")
                     || detail.to_lowercase().contains("limit")
                 {
-                    anyhow::bail!("Gateway {} messages error {code}: {} (after {attempts} attempts, waited {waited}s)\nHint: rate/limit still hit — try a different model or wait a minute", self.name(), detail.chars().take(400).collect::<String>());
+                    anyhow::bail!("Gateway {} messages error {code}: {human} (after {attempts} attempts, waited {waited}s)\nHint: rate/limit still hit — try a different model or wait a minute", self.name());
                 }
                 anyhow::bail!(
                     "Gateway {} messages error {code}: {} (after {attempts} attempts)",
                     self.name(),
-                    detail.chars().take(800).collect::<String>()
+                    super::super::humanize_error_body(&detail, 800)
                 );
             }
         };

@@ -10,6 +10,42 @@ pub fn http_client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
+/// Humanize a provider error body for chat + desktop notifications.
+/// Upstream bodies are often raw JSON (`{"error":{"message":...}}`) —
+/// showing that verbatim in a notification reads as "error as json".
+/// Extracts the human message from common shapes, else first line,
+/// truncated to `max` chars.
+pub(crate) fn humanize_error_body(text: &str, max: usize) -> String {
+    let trimmed = text.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+        // {"error": {"message": "..."}} (OpenRouter, gateway, Gemini)
+        if let Some(err) = v.get("error") {
+            if let Some(msg) = err.get("message").and_then(|m| m.as_str()) {
+                return first_line_capped(msg, max);
+            }
+            if let Some(s) = err.as_str() {
+                return first_line_capped(s, max);
+            }
+        }
+        for key in ["message", "detail", "msg"] {
+            if let Some(s) = v.get(key).and_then(|x| x.as_str()) {
+                return first_line_capped(s, max);
+            }
+        }
+    }
+    first_line_capped(trimmed, max)
+}
+
+fn first_line_capped(s: &str, max: usize) -> String {
+    s.lines()
+        .next()
+        .unwrap_or(s)
+        .trim()
+        .chars()
+        .take(max)
+        .collect()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ProviderEvent {
     TextDelta(String),
@@ -251,5 +287,22 @@ mod tests {
         assert!(m2.content_len() > "read".len());
         let img = ChatMessage::with_image("user", "t", "QUJD");
         assert!(img.content_as_str().contains("image_url"));
+    }
+
+    #[test]
+    fn humanize_extracts_message_from_json() {
+        let json = r#"{"error":{"message":"No endpoints found for free-tier","code":429}}"#;
+        assert_eq!(
+            humanize_error_body(json, 300),
+            "No endpoints found for free-tier"
+        );
+        let json2 = r#"{"error": "boom"}"#;
+        assert_eq!(humanize_error_body(json2, 300), "boom");
+        let json3 = r#"{"message": "quota exceeded"}"#;
+        assert_eq!(humanize_error_body(json3, 300), "quota exceeded");
+        let plain = "plain failure\nsecond line";
+        assert_eq!(humanize_error_body(plain, 300), "plain failure");
+        // Never leaks braces for the notification path.
+        assert!(!humanize_error_body(json, 300).contains('{'));
     }
 }
