@@ -396,6 +396,10 @@ impl SubagentPool {
         // Label the subagent loop with the parent mode so its turns tag
         // tasks/artifacts consistently (registry already intersected).
         loop_.mode = mode_label;
+        // Never stream to stdout: a background subagent sharing the TUI
+        // process would corrupt the alternate screen (raw markdown flow).
+        // Results travel via the tracker + transcript session instead.
+        loop_.quiet_stdout = true;
 
         let full_prompt = format!("{}\n\nTask: {}", kind.system_extra(), prompt);
         loop_

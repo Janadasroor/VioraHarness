@@ -28,6 +28,12 @@ pub struct AgentLoop {
     /// turn and pushes while it runs; `run_inner` drains it at turn
     /// boundaries. Unused (always empty) for server-spawned loops.
     pub injector: Injector,
+    /// Suppress the headless stdout streaming (`print!` of text deltas).
+    /// The subagent pool sets this: a background subagent sharing the
+    /// process with the TUI must never write raw deltas to stdout — that
+    /// corrupts the alternate screen (TUI vanishes, raw markdown flows).
+    /// Headless `run` leaves it false so turns still stream to the terminal.
+    pub quiet_stdout: bool,
 }
 
 /// Spill files (`vioraharness_tool_*.json`) accumulate in `dir` across turns
@@ -74,6 +80,7 @@ impl AgentLoop {
             max_tokens: 128_000,
             mode,
             injector: Injector::default(),
+            quiet_stdout: false,
         }
     }
 
@@ -94,6 +101,7 @@ impl AgentLoop {
             max_tokens: 128_000,
             mode,
             injector: Injector::default(),
+            quiet_stdout: false,
         }
     }
 
@@ -104,6 +112,7 @@ impl AgentLoop {
             max_tokens: 128_000,
             mode: crate::mode::ModeGuard::current(),
             injector: Injector::default(),
+            quiet_stdout: false,
         }
     }
 
@@ -592,7 +601,10 @@ impl AgentLoop {
                 }
                 match ev {
                     ProviderEvent::TextDelta(t) => {
-                        if stream_tx.is_none() && std::env::var("VIORAHARNESS_TUI").is_err() {
+                        if stream_tx.is_none()
+                            && !self.quiet_stdout
+                            && std::env::var("VIORAHARNESS_TUI").is_err()
+                        {
                             print!("{t}");
                             use std::io::Write;
                             let _ = std::io::stdout().flush();
@@ -622,7 +634,10 @@ impl AgentLoop {
                     ProviderEvent::Done => break,
                 }
             }
-            if stream_tx.is_none() && std::env::var("VIORAHARNESS_TUI").is_err() {
+            if stream_tx.is_none()
+                && !self.quiet_stdout
+                && std::env::var("VIORAHARNESS_TUI").is_err()
+            {
                 println!();
             }
 
