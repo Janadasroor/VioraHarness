@@ -529,11 +529,28 @@ pub fn active_runs() -> Vec<SubagentRun> {
 /// Each completion drains once, like `tasks::take_completions`.
 /// Hydrates first so completions missed during downtime still surface.
 pub fn take_completions() -> Vec<SubagentRun> {
+    take_completions_for(None)
+}
+
+/// Scoped drain: only runs belonging to `scope` surface. A run belongs
+/// when it has no parent link yet (legacy/test probes, spawn race) or
+/// its parent is the scoped chat. Other chats' runs stay un-notified so
+/// they surface when their own chat polls — without this a completion
+/// would post (and persist) into whatever chat happens to be open.
+pub fn take_completions_for(scope: Option<&str>) -> Vec<SubagentRun> {
     hydrate_runs();
     let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
     let mut out = Vec::new();
     for run in runs.iter_mut() {
         if run.status != SubagentStatus::Running && !run.notified {
+            let belongs = match (scope, run.parent_session.as_deref()) {
+                (None, _) => true,
+                (Some(_), None) => true,
+                (Some(s), Some(p)) => p == s,
+            };
+            if !belongs {
+                continue;
+            }
             run.notified = true;
             out.push(run.clone());
         }

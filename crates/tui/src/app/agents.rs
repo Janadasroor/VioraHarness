@@ -75,7 +75,8 @@ impl App {
     /// chat notice + desktop alert always, follow-up turn with the
     /// result when idle (mirrors background bash tasks). Runs every
     /// event-loop iteration; each completion drains once. Returns the
-    /// waked run ids.
+    /// waked run ids. Notices persist into the parent chat so an
+    /// Esc-return (store reload) keeps them instead of going blank.
     pub(crate) fn poll_subagent_completions(&mut self) -> Vec<String> {
         // Subagent transcript views are read-only peeks: never drain the
         // global completion queue here. Draining marks runs surfaced, so
@@ -84,8 +85,11 @@ impl App {
         if self.viewing_subagent() {
             return Vec::new();
         }
+        // Scoped drain: other chats' runs stay queued until their own
+        // chat polls — they must never post (or persist) here.
+        let scope = self.session_id.clone();
         let mut waked = Vec::new();
-        for done in tracker::take_completions() {
+        for done in tracker::take_completions_for(Some(&scope)) {
             let (mark, urgent) = match done.status {
                 tracker::SubagentStatus::Done => ("⑂✔", false),
                 tracker::SubagentStatus::Error => ("⑂✖", true),
@@ -100,6 +104,12 @@ impl App {
                     short_task_id(&done.id),
                     done.status.as_str(),
                 ),
+            ));
+            self.persist_system_notice(&format!(
+                "{mark} subagent {} {} ({}) — Enter on its /agents row for detail",
+                done.kind,
+                short_task_id(&done.id),
+                done.status.as_str(),
             ));
             self.notify(
                 &format!(
@@ -301,7 +311,9 @@ impl App {
     /// (prompt preview), so a spawn is visible without opening /agents.
     /// Runs every event-loop iteration. History hydrated from sqlite is
     /// never announced: only runs started after boot qualify, and each
-    /// id announces once.
+    /// id announces once. Scoped to this chat (unattributed probes still
+    /// show); other chats' runs surface when their own chat polls.
+    /// Notices persist so an Esc-return reload keeps them.
     pub(crate) fn poll_subagent_starts(&mut self) {
         // Read-only peek: launch announcements belong to the main chat.
         // Posting them here would pollute the transcript being viewed.
@@ -312,16 +324,34 @@ impl App {
             if run.started_at < self.booted_at {
                 continue;
             }
+            match run.parent_session.as_deref() {
+                Some(p) if p != self.session_id => continue,
+                _ => {}
+            }
             if self.seen_subagents.insert(run.id.clone()) {
                 let title: String = run.prompt_preview.chars().take(100).collect();
-                self.messages.push(Msg::new(
-                    "system",
-                    format!(
-                        "⑂ subagent {} {} launched — {title} (/agents to watch)",
-                        run.kind,
-                        short_task_id(&run.id),
-                    ),
-                ));
+                let notice = format!(
+                    "⑂ subagent {} {} launched — {title} (/agents to watch)",
+                    run.kind,
+                    short_task_id(&run.id),
+                );
+                self.messages.push(Msg::new("system", notice.clone()));
+                self.persist_system_notice(&notice);
+            }
+        }
+    }
+
+    /// Best-effort persist of an in-memory system notice into the current
+    /// chat, so store reloads (Esc-return from a transcript, resume)
+    /// keep what the live view showed. Skips when the session isn't in
+    /// the store (tests, transient views) — the in-memory message is
+    /// already posted either way.
+    pub(crate) fn persist_system_notice(&self, text: &str) {
+        let db = std::env::var("VIORAHARNESS_DB")
+            .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+        if let Ok(store) = vioraharness_core::session::SessionStore::new(&db) {
+            if let Ok(Some(_)) = store.get_session(&self.session_id) {
+                let _ = store.append_message(&self.session_id, "system", text);
             }
         }
     }
@@ -1120,6 +1150,76 @@ mod tests {
         assert!(
             text.contains("subagents •"),
             "header without chats section: {text:?}"
+        );
+    }
+
+    #[test]
+    fn subagent_notices_persist_and_survive_reload() {
+        // Regression for "navigate to sub and back, launch lines
+        // disappear": notices were in-memory only, so the Esc-return
+        // reload wiped them. They now persist into the parent chat.
+        let (_env, db) = agents_env("notices");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store
+            .create_session("sess-main-n", "m", Some("main"))
+            .unwrap();
+        let mut app = test_app();
+        app.session_id = "sess-main-n".into();
+        app.booted_at = 0;
+        let prompt = unique_prompt("persist-notice");
+        let (id, _) = tracker::track_start("explore", &prompt, "eda");
+        tracker::set_run_parent(&id, "sess-main-n");
+        app.poll_subagent_starts();
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("launched")),
+            "launch posted live"
+        );
+        tracker::track_finish(&id, true, "done-result");
+        app.wake_on_tasks = false;
+        app.poll_subagent_completions();
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("(done)")),
+            "completion posted live"
+        );
+        // Simulate the Esc-return: reload from the store must keep both.
+        app.reload_display_from_store(&store, "sess-main-n");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("launched")),
+            "launch survives reload"
+        );
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("(done)")),
+            "completion survives reload"
+        );
+    }
+
+    #[test]
+    fn completions_stay_queued_for_other_chats() {
+        // Other chats' runs must not post (or persist) into this chat —
+        // they surface when their own chat polls.
+        let (_env, db) = agents_env("scopedrain");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store.create_session("sess-a", "m", Some("a")).unwrap();
+        store.create_session("sess-b", "m", Some("b")).unwrap();
+        let (id, _) = tracker::track_start("explore", &unique_prompt("scoped"), "eda");
+        tracker::set_run_parent(&id, "sess-b");
+        tracker::track_finish(&id, true, "b-result");
+        let mut app = test_app();
+        app.session_id = "sess-a".into();
+        app.wake_on_tasks = false;
+        let waked = app.poll_subagent_completions();
+        assert!(waked.is_empty(), "nothing for sess-a");
+        assert!(
+            !app.messages.iter().any(|m| m.content.contains(&id[..8])),
+            "no leak into sess-a"
+        );
+        app.session_id = "sess-b".into();
+        let waked = app.poll_subagent_completions();
+        assert!(
+            waked.contains(&id) || app.messages.iter().any(|m| m.content.contains("(done)")),
+            "sess-b surfaces it"
         );
     }
 }
