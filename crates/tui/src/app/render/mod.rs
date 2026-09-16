@@ -92,6 +92,24 @@ mod tests {
     }
 
     #[test]
+    fn wake_rows_render_collapsed_on_any_load_path() {
+        // Regression for close+reopen showing the whole wake wall: the
+        // sessions-dialog resume/fork builds messages straight from the
+        // store and bypasses the reload collapse, so draw_chat collapses
+        // wake rows itself (idempotent with the reload path).
+        let mut app = test_app();
+        app.messages.push(Msg::new(
+            "system",
+            "[background subagent finished] 3d700001 (coder) done.\nTask was: build things\nResult:\n## huge wall ||| with | tables |\nContinue from where you left off; do not restart.",
+        ));
+        let text = render_text(&mut app, 100, 30);
+        assert!(text.contains("3d700001 (coder) done"), "first line shown");
+        assert!(text.contains("/agents for detail"), "hint shown");
+        assert!(!text.contains("huge wall"), "body hidden: {text:?}");
+        assert!(!text.contains("Continue from where"), "{text:?}");
+    }
+
+    #[test]
     fn ctrl_x_expands_most_recent_tool_output() {
         let (mut app, _) = long_tool_app();
         app.toggle_recent_long_message();

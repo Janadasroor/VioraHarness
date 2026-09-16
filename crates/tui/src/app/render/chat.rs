@@ -54,7 +54,19 @@ impl App {
                 _ => ("  ", Style::default()),
             };
 
-            let raw = if m.content.chars().count() > 20000 {
+            let raw = if m.role == "system"
+                && (m.content.starts_with("[background subagent finished]")
+                    || m.content.starts_with("[background task finished]"))
+            {
+                // Internal wake prompts carry the full result/log for the
+                // model. Collapse at render time too: some load paths
+                // (sessions-dialog resume/fork) build messages straight
+                // from the store and bypass the reload collapse — without
+                // this a close+reopen shows the whole wall again.
+                // Idempotent with the reload collapse (already-collapsed
+                // rows reduce to their own first line).
+                Self::collapse_wake_for_display(&m.role, &m.content)
+            } else if m.content.chars().count() > 20000 {
                 let mut cut = truncate_chars(&m.content, 20000);
 
                 if cut.lines().filter(|l| l.trim().starts_with("```")).count() % 2 == 1 {
