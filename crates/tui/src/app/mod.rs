@@ -1619,6 +1619,7 @@ impl App {
         let sid = self.session_id.clone();
         let res = self.event_loop(&mut terminal, &input_rx, &sigint).await;
         sigint_task.abort();
+        tracing::info!("tui shutdown: event loop exited for {sid}");
         let _ = crossterm::execute!(std::io::stdout(), crossterm::event::DisableMouseCapture);
         ratatui::restore();
         Self::restore_terminal_title();
@@ -2130,6 +2131,7 @@ impl App {
                             && !k.modifiers.contains(KeyModifiers::ALT)
                         {
                             if self.handle_ctrl_c() {
+                                tracing::info!("tui quit: double Ctrl+C confirmed");
                                 self.should_quit = true;
                                 break;
                             }
@@ -2455,6 +2457,7 @@ impl App {
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => {
                         // Reader gone (terminal lost): nothing left to drive us.
+                        tracing::warn!("tui quit: input reader disconnected");
                         self.should_quit = true;
                         break;
                     }

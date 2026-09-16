@@ -66,6 +66,7 @@ impl App {
         if sigint.load(std::sync::atomic::Ordering::SeqCst) {
             self.confirm_armed = None;
             self.status = "interrupted — shutting down".into();
+            tracing::warn!("tui quit: OS SIGINT received");
             self.should_quit = true;
             return true;
         }
@@ -370,6 +371,7 @@ impl App {
                     self.popup = Popup::None;
                 } else if self.confirm_quit() {
                     // Fully idle Esc: first press arms, second quits.
+                    tracing::info!("tui quit: idle double-Esc confirmed");
                     self.should_quit = true;
                 }
             }
