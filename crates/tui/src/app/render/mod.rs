@@ -34,6 +34,54 @@ mod tests {
     }
 
     #[test]
+    fn fence_rows_never_dangle_their_border() {
+        // Regression ("dirty subagent view"): code-fence rows ran exactly
+        // one cell too wide so every right border wrapped onto its own row,
+        // and the 7-cell timestamp on structured first-rows could never fit
+        // and littered stray fragments. Structured rows are full-bleed by
+        // design and carry no timestamp now.
+        let mut app = test_app();
+        let mut m = Msg::new(
+            "assistant",
+            "```json\n{\"id\": 7, \"bug\": \"tooling gaps wmctrl/xdotool\", \"status\": \"partial\", \"evidence\": \"xdotool present, wmctrl missing\"}\n```",
+        );
+        m.timestamp = "12:08".into();
+        app.messages.push(m);
+        let text = render_text(&mut app, 100, 30);
+        for line in text.lines() {
+            let t = line.trim_end();
+            assert!(
+                !(t.starts_with('│') && t.trim_start_matches('│').trim().is_empty()),
+                "no lone dangling border row: {t:?}\n{text}"
+            );
+        }
+        assert!(
+            text.lines().any(|l| {
+                // Strip the chat's own border columns before judging the box.
+                let t: Vec<char> = l.trim_end().chars().collect();
+                t.len() > 2
+                    && t[0] == '│'
+                    && t[t.len() - 1] == '│'
+                    && t[1..t.len() - 1]
+                        .iter()
+                        .collect::<String>()
+                        .contains("┌─ json")
+                    && t[t.len() - 2] == '┐'
+            }),
+            "fence open is complete on one row:\n{text}"
+        );
+        assert!(
+            !text.contains("12:08"),
+            "no stray timestamp fragments on structured rows:\n{text}"
+        );
+        assert!(
+            text.lines()
+                .any(|l| l.contains("tooling gaps") && l.trim_end().ends_with('│')),
+            "body rows keep the right edge on the same row:\n{text}"
+        );
+    }
+
+    #[test]
     fn long_tool_output_collapses_with_hint() {
         let (mut app, _) = long_tool_app();
         let text = render_text(&mut app, 100, 40);

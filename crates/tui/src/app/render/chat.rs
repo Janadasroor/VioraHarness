@@ -131,9 +131,9 @@ impl App {
                                 let mut spans =
                                     vec![Span::styled(if li == 0 { prefix } else { "  " }, style)];
                                 spans.extend(fence_open_spans(&lang, code_inner));
-                                if li == 0 {
-                                    spans.push(time.clone());
-                                }
+                                // No timestamp: structured rows are full-bleed
+                                // by design — a 7-cell tail can never fit and
+                                // would dangle onto its own row (dirty view).
                                 all_lines.push(Line::from(spans));
                             } else {
                                 let mut spans = vec![Span::styled("  ", style)];
@@ -156,9 +156,7 @@ impl App {
                                         style,
                                     )];
                                     spans.extend(mrow);
-                                    if li == 0 && mi == 0 {
-                                        spans.push(time.clone());
-                                    }
+                                    // No timestamp (see fence open above).
                                     all_lines.push(Line::from(spans));
                                 }
                                 skip_until = li + consumed;
@@ -176,9 +174,7 @@ impl App {
                                         style,
                                     )];
                                     spans.extend(tline);
-                                    if li == 0 && ti == 0 {
-                                        spans.push(time.clone());
-                                    }
+                                    // No timestamp (see fence open above).
                                     all_lines.push(Line::from(spans));
                                 }
                                 skip_until = li + consumed;
@@ -196,9 +192,7 @@ impl App {
                                 ));
                                 line_spans.extend(code_body_spans(piece, code_inner));
 
-                                if li == 0 && wi == 0 {
-                                    line_spans.push(time.clone());
-                                }
+                                // No timestamp (see fence open above).
                                 all_lines.push(Line::from(line_spans));
                             }
                             continue;

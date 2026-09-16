@@ -273,9 +273,9 @@ pub(crate) fn code_lang_from_fence(line: &str) -> String {
 pub(crate) const FENCE_MIN_INNER: usize = 12;
 
 /// Inner content width available for a code box: 2 (chat gutter) + 2 (`│ `)
-/// + inner + 2 (` │`) + 1 margin must fit `area_width`.
+/// + inner + 2 (` │`) must fit the chat inner width (`area_width - 2`).
 pub(crate) fn code_inner_max(area_width: usize) -> usize {
-    area_width.saturating_sub(7).max(FENCE_MIN_INNER)
+    area_width.saturating_sub(8).max(FENCE_MIN_INNER)
 }
 
 pub(crate) fn expand_code_tabs(s: &str) -> String {
@@ -345,14 +345,15 @@ pub(crate) fn wrap_code_line(line: &str, inner: usize) -> Vec<String> {
 }
 
 pub(crate) fn fence_open_spans(lang: &str, inner: usize) -> Vec<Span<'static>> {
+    use unicode_width::UnicodeWidthStr;
     let label = if lang.is_empty() {
         "code".to_string()
     } else {
         lang.to_string()
     };
     let inner = inner.max(FENCE_MIN_INNER);
-    // `┌─ {label} {─…}┐` totals inner + 4.
-    let dashes = (inner + 4).saturating_sub(4 + label.len() + 1);
+    // `┌─ {label} {─…}┐` totals inner + 4 (display width, not bytes).
+    let dashes = (inner + 4).saturating_sub(4 + label.width() + 1);
     let mut spans = vec![Span::styled("┌─ ", Theme::code_block())];
     spans.push(Span::styled(label, Theme::code_lang_label()));
     spans.push(Span::styled(
