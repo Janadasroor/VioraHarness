@@ -338,6 +338,55 @@ impl App {
         self.session_id.starts_with(tracker::SUB_SESSION_PREFIX)
     }
 
+    /// Live-refresh the open subagent transcript (called every event-loop
+    /// tick). The view loads once on Enter, but a running subagent keeps
+    /// appending to its session in the store — without this the view looks
+    /// frozen until the user leaves and re-enters. Reloads at most once
+    /// per second while the linked run is still Running, plus one final
+    /// reload when it lands. Scroll position is preserved (draw_chat holds
+    /// scrolled-up views steady); refuses nothing, mutates only this view.
+    /// Returns true when the view changed and needs a redraw.
+    pub(crate) fn poll_subview_refresh(&mut self) -> bool {
+        if !self.viewing_subagent() {
+            return false;
+        }
+        if self.subview_last_refresh.elapsed() < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        self.subview_last_refresh = std::time::Instant::now();
+        let run = tracker::run_for_session(&self.session_id);
+        let running = run
+            .as_ref()
+            .is_some_and(|r| r.status == tracker::SubagentStatus::Running);
+        if !running {
+            if self.subview_finalized {
+                return false;
+            }
+            self.subview_finalized = true;
+        }
+        let finishing = !running;
+        let db = std::env::var("VIORAHARNESS_DB")
+            .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
+        let Ok(store) = vioraharness_core::session::SessionStore::new(&db) else {
+            return false;
+        };
+        let sid = self.session_id.clone();
+        let before = self.messages.len();
+        self.reload_display_from_store(&store, &sid);
+        if !running {
+            let state = run.map(|r| r.status.as_str().to_string());
+            self.status = match state.as_deref() {
+                Some(s) => format!("subagent {s} — Esc back to main"),
+                None => "subagent transcript — read-only, no input (Esc back to main)".into(),
+            };
+        }
+        // Tool results can land under an existing message row (same count,
+        // richer items) — redraw whenever the run is still live. The
+        // finishing transition also redraws (status flips to done) even
+        // with no new rows: the result already streamed in while live.
+        running || finishing || self.messages.len() != before
+    }
+
     /// Enter on the highlighted Agents row: contextual navigation.
     /// Id-anchored (see `resolve_agent_row`): entering a subagent can
     /// never land on Live just because the list re-sorted. A linked run
@@ -359,6 +408,8 @@ impl App {
                         self.return_session = Some(self.session_id.clone());
                     }
                     self.resume_chat(&sid);
+                    self.subview_finalized = false;
+                    self.subview_last_refresh = std::time::Instant::now();
                     self.popup = Popup::None;
                     self.status =
                         "subagent transcript — read-only, no input (Esc back to main)".into();
@@ -986,5 +1037,50 @@ mod tests {
             app.messages.iter().any(|m| m.content.contains("read-only")),
             "refusal explained"
         );
+    }
+
+    #[test]
+    fn subview_refreshes_live_transcript_without_reenter() {
+        // The open transcript must follow a running subagent: new store
+        // rows appear via the periodic refresh, plus one final reload
+        // when the run lands — then ticks stay quiet.
+        let (_env, db) = agents_env("subrefresh");
+        let _lock = completion_lock();
+        let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
+        store
+            .create_session("sub-sa_refr1", "model-s", Some("live"))
+            .unwrap();
+        store
+            .append_message("sub-sa_refr1", "user", "first xyz")
+            .unwrap();
+        let (id, _) = tracker::track_start("explore", &unique_prompt("refresh"), "eda");
+        tracker::set_run_session(&id, "sub-sa_refr1");
+        let past = || std::time::Instant::now() - std::time::Duration::from_secs(5);
+        let mut app = test_app();
+        app.session_id = "sub-sa_refr1".into();
+        app.subview_last_refresh = past();
+        assert!(app.poll_subview_refresh(), "loads running transcript");
+        assert!(
+            app.messages.iter().any(|m| m.content.contains("first xyz")),
+            "first row shown"
+        );
+        store
+            .append_message("sub-sa_refr1", "assistant", "second xyz")
+            .unwrap();
+        app.subview_last_refresh = past();
+        assert!(app.poll_subview_refresh(), "new rows stream in");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("second xyz")),
+            "no re-enter needed"
+        );
+        tracker::track_finish(&id, true, "done");
+        app.subview_last_refresh = past();
+        assert!(app.poll_subview_refresh(), "final reload on finish");
+        assert!(app.status.contains("Esc back to main"), "{}", app.status);
+        app.subview_last_refresh = past();
+        assert!(!app.poll_subview_refresh(), "quiet once finalized");
+        let _ = tracker::take_completions();
     }
 }

@@ -105,6 +105,12 @@ pub struct App {
     /// Session to return to with Esc from a subagent transcript view.
     /// Set when /agents opens a linked run's session, consumed by Esc.
     pub(crate) return_session: Option<String>,
+    /// Last time the open subagent transcript was reloaded from the store
+    /// (`poll_subview_refresh` throttles to ~1/s while its run is live).
+    pub(crate) subview_last_refresh: std::time::Instant,
+    /// The open subagent view already did its final reload after the run
+    /// landed, so later ticks stay quiet. Reset on every transcript open.
+    pub(crate) subview_finalized: bool,
     pub(crate) task_cursor: usize,
     pub(crate) error_cursor: usize,
     pub(crate) rewind_cursor: usize,
@@ -1498,6 +1504,8 @@ impl App {
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
             return_session: None,
+            subview_last_refresh: std::time::Instant::now(),
+            subview_finalized: false,
             task_cursor: 0,
             error_cursor: 0,
             rewind_cursor: 0,
@@ -1688,6 +1696,9 @@ impl App {
             self.poll_task_completions();
             self.poll_subagent_completions();
             self.poll_subagent_starts();
+            if self.poll_subview_refresh() {
+                dirty = true;
+            }
 
             if let Some(rx) = &mut self.perm_rx {
                 match rx.try_recv() {
