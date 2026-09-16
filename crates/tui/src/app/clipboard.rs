@@ -13,6 +13,10 @@ impl App {
     /// on them. Completion lands via `poll_clipboard_results`, which
     /// applies the same insert/attach rules the sync path used.
     pub(crate) fn begin_clipboard_paste(&mut self, text_only: bool) {
+        if self.viewing_subagent() {
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            return;
+        }
         // Newest request wins; a superseded thread's send fails silently.
         let (tx, rx) = std::sync::mpsc::channel();
         self.paste_rx = Some(rx);
@@ -71,6 +75,10 @@ impl App {
     }
 
     fn apply_paste_done(&mut self, done: PasteDone) {
+        if self.viewing_subagent() {
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            return;
+        }
         let mut pasted = false;
         if let Some((b64, w, h)) = done.img {
             let label = format!("{w}×{h}");

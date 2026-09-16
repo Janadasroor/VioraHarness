@@ -11,26 +11,35 @@ use unicode_width::UnicodeWidthStr;
 impl App {
     pub(crate) fn draw(&mut self, frame: &mut Frame) {
         let area = frame.area();
+        // Subagent view owns no input box at all: collapse its row so chat
+        // gains the space. Only the main agent controls input.
+        let no_input = self.viewing_subagent();
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1),
                 Constraint::Min(6),
-                Constraint::Length(3),
+                Constraint::Length(if no_input { 0 } else { 3 }),
                 Constraint::Length(1),
             ])
             .split(area);
 
         self.chat_area = chunks[1];
-        self.input_area = chunks[2];
+        self.input_area = if no_input {
+            Rect::new(0, 0, 0, 0)
+        } else {
+            chunks[2]
+        };
         self.draw_header(frame, chunks[0]);
         self.draw_chat(frame, chunks[1]);
-        self.draw_input(frame, chunks[2]);
+        if !no_input {
+            self.draw_input(frame, chunks[2]);
+        }
         self.draw_footer(frame, chunks[3]);
 
         if self.popup != Popup::None {
             self.draw_popup(frame, area);
-        } else if self.input.text.starts_with('/') {
+        } else if !no_input && self.input.text.starts_with('/') {
             self.draw_completions(frame, chunks[2]);
         }
     }

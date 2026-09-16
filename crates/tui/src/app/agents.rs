@@ -319,22 +319,19 @@ impl App {
         }
     }
 
-    /// True while viewing a subagent transcript whose run is still live:
-    /// input stays out of the way (hidden box, swallowed edits, refused
-    /// turns) until it finishes. Finished transcripts are ordinary chats.
-    pub(crate) fn viewing_locked_subagent(&self) -> bool {
+    /// True while viewing any subagent transcript (`sub-` session): input
+    /// stays hidden and all turns are refused — only the main agent owns
+    /// the input box. Holds even after the run finishes; Esc returns.
+    pub(crate) fn viewing_subagent(&self) -> bool {
         self.session_id.starts_with(tracker::SUB_SESSION_PREFIX)
-            && tracker::run_for_session(&self.session_id)
-                .is_some_and(|r| r.status == tracker::SubagentStatus::Running)
     }
 
     /// Enter on the highlighted Agents row: contextual navigation.
     /// Id-anchored (see `resolve_agent_row`): entering a subagent can
     /// never land on Live just because the list re-sorted. A linked run
-    /// opens its transcript session — the subagent's own view — whether
-    /// finished or still running (a running transcript is read-only until
-    /// it finishes; back via /sessions). Rows from before the session
-    /// link fall back to the detail post.
+    /// opens its transcript session — the subagent's own view, always
+    /// read-only with no input box (Esc returns). Rows from before the
+    /// session link fall back to the detail post.
     pub(crate) fn agents_activate(&mut self) {
         let Some(row) = self.resolve_agent_row() else {
             return;
@@ -345,17 +342,14 @@ impl App {
                 self.status = "already here — this is the live turn".into();
             }
             AgentRow::Subagent(run) => {
-                let running = run.status == tracker::SubagentStatus::Running;
                 if let Some(sid) = run.session_id.clone() {
                     if sid != self.session_id {
                         self.return_session = Some(self.session_id.clone());
                     }
                     self.resume_chat(&sid);
                     self.popup = Popup::None;
-                    if running {
-                        self.status =
-                            "live transcript — read-only while running (Esc back to main)".into();
-                    }
+                    self.status =
+                        "subagent transcript — read-only, no input (Esc back to main)".into();
                     return;
                 }
                 self.show_subagent_detail(&run);
@@ -647,9 +641,8 @@ mod tests {
 
     #[tokio::test]
     async fn enter_running_linked_run_opens_readonly_transcript() {
-        // A running subagent opens its live transcript too — but user
-        // turns stay out until it finishes (both loops would append
-        // there and corrupt it).
+        // A subagent transcript is always read-only with no input box —
+        // running or finished, only the main agent takes input.
         let (_env, db) = agents_env("sublive");
         let _lock = completion_lock();
         let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
@@ -681,14 +674,16 @@ mod tests {
             app.messages.iter().any(|m| m.content.contains("read-only")),
             "refusal explained"
         );
-        // ...and allowed once it finishes.
+        // ...and still refused after it finishes — only main owns input.
         tracker::track_finish(&id, true, "all done");
         app.start_turn("follow up".into(), None, "user");
-        assert!(app.busy, "turn starts after finish");
-        if let Some(h) = app.pending.take() {
-            h.abort();
-        }
-        app.busy = false;
+        assert!(!app.busy, "still no turn in subagent view");
+        assert!(
+            app.messages
+                .iter()
+                .any(|m| m.content.contains("Esc back to main")),
+            "refusal points home"
+        );
         let _ = tracker::take_completions();
     }
 
@@ -906,25 +901,32 @@ mod tests {
     async fn locked_subview_hides_input_and_swallows_edits() {
         use crossterm::event::KeyCode;
         let _lock = completion_lock();
-        assert!(!test_app().viewing_locked_subagent(), "main chat editable");
+        assert!(!test_app().viewing_subagent(), "main chat editable");
         let (id, _) = tracker::track_start("explore", &unique_prompt("lockview"), "eda");
         tracker::set_run_session(&id, "sub-sa_lock1");
         let mut app = test_app();
         app.session_id = "sub-sa_lock1".into();
-        assert!(app.viewing_locked_subagent(), "running transcript locked");
-        // No textbox rendered...
+        assert!(app.viewing_subagent(), "subagent view has no input");
+        // No textbox rendered at all — not even a read-only bar.
         let text = render_text(&mut app, 100, 30);
-        assert!(text.contains("read-only"), "read-only bar shown");
         assert!(!text.contains("Enter send"), "no input chrome");
+        assert!(!text.contains("Input —"), "input box gone");
+        assert!(
+            app.input_area.width == 0 && app.input_area.height == 0,
+            "layout collapsed"
+        );
         // ...and keystrokes never reach it.
         app.handle_key(KeyCode::Char('x')).await.unwrap();
         assert!(app.input.text.is_empty(), "char swallowed");
-        // Finished transcripts edit normally again.
+        app.handle_key(KeyCode::Enter).await.unwrap();
+        assert!(!app.busy, "enter submits nothing");
+        // Finished transcripts stay input-less too — only main owns input.
         tracker::track_finish(&id, true, "done");
-        assert!(!app.viewing_locked_subagent(), "unlocked after finish");
+        assert!(app.viewing_subagent(), "still no input after finish");
         app.handle_key(KeyCode::Char('y')).await.unwrap();
-        assert_eq!(app.input.text, "y");
-        app.input.text.clear();
+        assert!(app.input.text.is_empty(), "still swallowed");
+        app.start_turn("follow up".into(), None, "user");
+        assert!(!app.busy, "turns refused after finish too");
         let _ = tracker::take_completions();
     }
 }

@@ -161,6 +161,12 @@ impl App {
     }
 
     pub(crate) fn queue_prompt(&mut self, prompt: String) {
+        if self.viewing_subagent() {
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            self.input.text.clear();
+            self.input.cursor = 0;
+            return;
+        }
         let history_text = prompt.clone();
         let mut send = expand_paste_chips(&prompt, &self.pending_texts);
         self.pending_texts.clear();

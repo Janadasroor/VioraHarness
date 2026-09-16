@@ -35,6 +35,13 @@ impl App {
         }
         match code {
             KeyCode::Char(c) => {
+                // Subagent view owns no input box: swallow edits quietly
+                // (submit is refused too) instead of filling it invisibly.
+                // Holds after finish — only the main agent takes input.
+                if self.viewing_subagent() {
+                    self.status = "read-only: subagent view (Esc back to main)".into();
+                    return Ok(());
+                }
                 if c == '\t' {
                     if self.input.text.starts_with('/') {
                         let comps = self.input.slash_completions();
@@ -54,17 +61,14 @@ impl App {
                     };
                     return Ok(());
                 }
-                // Locked subagent view has no input box: swallow edits
-                // quietly (submit is refused too) instead of filling it
-                // invisibly.
-                if self.viewing_locked_subagent() {
-                    self.status = "read-only: subagent running (Esc back to main)".into();
-                    return Ok(());
-                }
                 self.input.insert(c);
                 self.input.completion_idx = 0;
             }
             KeyCode::Tab => {
+                if self.viewing_subagent() {
+                    self.status = "read-only: subagent view (Esc back to main)".into();
+                    return Ok(());
+                }
                 if self.input.text.starts_with('/') {
                     let comps = self.input.slash_completions();
                     if !comps.is_empty() {
@@ -83,24 +87,50 @@ impl App {
                 }
             }
             KeyCode::Backspace => {
-                if self.viewing_locked_subagent() {
+                if self.viewing_subagent() {
                     return Ok(());
                 }
                 self.input.backspace();
                 self.input.completion_idx = 0;
             }
             KeyCode::Delete => {
-                if self.viewing_locked_subagent() {
+                if self.viewing_subagent() {
                     return Ok(());
                 }
                 self.input.delete();
                 self.input.completion_idx = 0;
             }
-            KeyCode::Left => self.input.move_left(shift),
-            KeyCode::Right => self.input.move_right(shift),
-            KeyCode::Home => self.input.move_to_start(shift),
-            KeyCode::End => self.input.move_to_end(shift),
+            KeyCode::Left => {
+                if self.viewing_subagent() {
+                    return Ok(());
+                }
+                self.input.move_left(shift)
+            }
+            KeyCode::Right => {
+                if self.viewing_subagent() {
+                    return Ok(());
+                }
+                self.input.move_right(shift)
+            }
+            KeyCode::Home => {
+                if self.viewing_subagent() {
+                    return Ok(());
+                }
+                self.input.move_to_start(shift)
+            }
+            KeyCode::End => {
+                if self.viewing_subagent() {
+                    return Ok(());
+                }
+                self.input.move_to_end(shift)
+            }
             KeyCode::Up => {
+                // No input box in subagent view: arrows scroll the
+                // transcript instead of touching history.
+                if self.viewing_subagent() {
+                    self.scroll = self.scroll.saturating_add(1);
+                    return Ok(());
+                }
                 if self.busy {
                     self.scroll = self.scroll.saturating_add(1);
                 } else {
@@ -119,6 +149,12 @@ impl App {
                 }
             }
             KeyCode::Down => {
+                if self.viewing_subagent() {
+                    if self.scroll > 0 {
+                        self.scroll -= 1;
+                    }
+                    return Ok(());
+                }
                 if self.busy {
                     if self.scroll > 0 {
                         self.scroll -= 1;
@@ -160,6 +196,11 @@ impl App {
                         self.resume_chat(&prev);
                         return Ok(());
                     }
+                    // No way back stored (e.g. landed here without /agents):
+                    // open the sessions picker so there is always a way out.
+                    self.popup = Popup::Sessions;
+                    self.status = "subagent view is read-only — pick a main chat".into();
+                    return Ok(());
                 }
                 if self.pending_image.is_some() || !self.pending_texts.is_empty() {
                     let chips: Vec<String> = self
@@ -225,6 +266,11 @@ impl App {
                 }
             }
             KeyCode::Enter => {
+                // No input box in subagent view: nothing submits from here.
+                if self.viewing_subagent() {
+                    self.status = "read-only: subagent view (Esc back to main)".into();
+                    return Ok(());
+                }
                 if self.input.text.starts_with('/') {
                     let comps = self.input.slash_completions();
                     if !comps.is_empty() {

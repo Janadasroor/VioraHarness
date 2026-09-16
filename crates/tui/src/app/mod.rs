@@ -1212,6 +1212,10 @@ impl App {
     }
 
     fn insert_pasted_text(&mut self, txt: &str) {
+        if self.viewing_subagent() {
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            return;
+        }
         if is_long_paste(txt) {
             self.paste_seq += 1;
             let id = self.paste_seq;
@@ -1225,6 +1229,10 @@ impl App {
     }
 
     fn attach_pasted_image(&mut self, b64: String, mime: &'static str, label: String) {
+        if self.viewing_subagent() {
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            return;
+        }
         let chip = image_chip(&label);
         let kb = b64.len() / 1024;
         self.pending_image = Some(PendingImage { b64, mime, label });
@@ -2213,28 +2221,63 @@ impl App {
                             let _ = is_v_empty;
                         }
                         if k.code == KeyCode::Enter && k.modifiers.contains(KeyModifiers::ALT) {
+                            if self.viewing_subagent() {
+                                continue;
+                            }
                             self.input.insert('\n');
                             continue;
                         }
                         if k.code == KeyCode::Char('l')
                             && k.modifiers.contains(KeyModifiers::CONTROL)
                         {
+                            if self.viewing_subagent() {
+                                continue;
+                            }
                             self.input.text.clear();
                             self.input.cursor = 0;
                             continue;
                         }
 
                         if self.popup == Popup::None {
+                            // Subagent view has no input box: swallow all
+                            // clipboard/edit shortcuts that would fill it.
+                            let sub_readonly = self.viewing_subagent();
                             if k.modifiers.contains(KeyModifiers::CONTROL)
                                 && k.modifiers.contains(KeyModifiers::ALT)
                                 && matches!(k.code, KeyCode::Char('v') | KeyCode::Char('V'))
                             {
+                                if sub_readonly {
+                                    continue;
+                                }
                                 // Probed off-thread (arboard/X11 can stall);
                                 // completion inserts via poll_clipboard_results.
                                 self.begin_clipboard_paste(true);
                                 continue;
                             }
                             if k.modifiers.contains(KeyModifiers::CONTROL) {
+                                // Swallow input edits in subagent view before
+                                // they touch the (hidden) textbox.
+                                if sub_readonly {
+                                    match k.code {
+                                        KeyCode::Char('u')
+                                        | KeyCode::Char('U')
+                                        | KeyCode::Char('k')
+                                        | KeyCode::Char('K')
+                                        | KeyCode::Char('a')
+                                        | KeyCode::Char('A')
+                                        | KeyCode::Char('e')
+                                        | KeyCode::Char('E')
+                                        | KeyCode::Char('w')
+                                        | KeyCode::Char('W')
+                                        | KeyCode::Char('h')
+                                        | KeyCode::Char('H')
+                                        | KeyCode::Char('d')
+                                        | KeyCode::Char('D')
+                                        | KeyCode::Char('v')
+                                        | KeyCode::Char('V') => continue,
+                                        _ => {}
+                                    }
+                                }
                                 match k.code {
                                     KeyCode::Char('u') | KeyCode::Char('U') => {
                                         self.input.delete_to_start();
@@ -2267,6 +2310,9 @@ impl App {
                                         continue;
                                     }
                                     KeyCode::Char('v') | KeyCode::Char('V') => {
+                                        if sub_readonly {
+                                            continue;
+                                        }
                                         // Probed off-thread (arboard/X11 can
                                         // stall); completion inserts via
                                         // poll_clipboard_results.
@@ -2277,6 +2323,18 @@ impl App {
                                 }
                             }
                             if k.modifiers.contains(KeyModifiers::ALT) {
+                                if sub_readonly {
+                                    match k.code {
+                                        KeyCode::Char('d')
+                                        | KeyCode::Char('D')
+                                        | KeyCode::Backspace
+                                        | KeyCode::Char('b')
+                                        | KeyCode::Char('B')
+                                        | KeyCode::Char('f')
+                                        | KeyCode::Char('F') => continue,
+                                        _ => {}
+                                    }
+                                }
                                 match k.code {
                                     KeyCode::Char('d') | KeyCode::Char('D') => {
                                         self.input.delete_word_after();

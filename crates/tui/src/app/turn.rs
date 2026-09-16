@@ -3,6 +3,17 @@ use super::*;
 
 impl App {
     pub(crate) fn submit_text(&mut self, prompt: String) -> anyhow::Result<()> {
+        // Subagent views own no input: refuse before echoing anything.
+        if self.viewing_subagent() {
+            self.messages.push(Msg::new(
+                "system",
+                "subagent view is read-only — Esc back to main to chat".to_string(),
+            ));
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            self.input.text.clear();
+            self.input.cursor = 0;
+            return Ok(());
+        }
         if self.model.trim().is_empty() {
             self.messages.push(Msg::new(
                 "system",
@@ -48,6 +59,12 @@ impl App {
     /// take it (turn just ended, session switched) or when an image is
     /// attached (injection is text-only in v1).
     pub(crate) fn submit_instant(&mut self, prompt: String) {
+        if self.viewing_subagent() {
+            self.status = "read-only: subagent view (Esc back to main)".into();
+            self.input.text.clear();
+            self.input.cursor = 0;
+            return;
+        }
         let stripped = prompt
             .strip_prefix('$')
             .unwrap_or(&prompt)
@@ -91,22 +108,15 @@ impl App {
         image: Option<(String, String)>,
         prompt_role: &'static str,
     ) {
-        // A running subagent owns its transcript session: user turns stay
-        // out until it finishes (both loops append there — interleaving
-        // would corrupt the transcript). System turns (task wakes) pass.
-        if prompt_role == "user"
-            && self
-                .session_id
-                .starts_with(vioraharness_core::subagent::tracker::SUB_SESSION_PREFIX)
-            && vioraharness_core::subagent::tracker::run_for_session(&self.session_id).is_some_and(
-                |r| r.status == vioraharness_core::subagent::tracker::SubagentStatus::Running,
-            )
-        {
+        // A subagent transcript never takes user turns: only the main
+        // agent owns the input box. Holds after finish too. System turns
+        // (task wakes) still pass.
+        if prompt_role == "user" && self.viewing_subagent() {
             self.messages.push(Msg::new(
                 "system",
-                "subagent still running — this view is read-only until it finishes (Esc back to main)".to_string(),
+                "subagent view is read-only — Esc back to main to chat".to_string(),
             ));
-            self.status = "read-only: subagent running".into();
+            self.status = "read-only: subagent view".into();
             self.scroll = 0;
             return;
         }
