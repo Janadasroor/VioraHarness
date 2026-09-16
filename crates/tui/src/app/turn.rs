@@ -193,6 +193,13 @@ impl App {
                     (m.created_at % 3600) / 60
                 )
             });
+            // Background wake prompts carry the full subagent result /
+            // task log tail for the LLM (up to 2000 chars). Showing that
+            // verbatim after an Esc-return reads as messy text: one huge
+            // system row with tables flattened. Collapse to the first
+            // line — the persisted row keeps full context for the model,
+            // the follow-up assistant message carries the summary.
+            let content = Self::collapse_wake_for_display(&m.role, &m.content);
             if m.role == "assistant" {
                 if let Some(calls) = tool_map.get(&m.seq) {
                     let mut items = Vec::new();
@@ -217,7 +224,7 @@ impl App {
                     }
                     self.messages.push(Msg {
                         role: m.role.clone(),
-                        content: m.content.clone(),
+                        content: content.clone(),
                         items,
                         timestamp: ts,
                         reasoning: m.reasoning.clone(),
@@ -227,13 +234,37 @@ impl App {
             }
             self.messages.push(Msg {
                 role: m.role.clone(),
-                content: m.content.clone(),
+                content,
                 items: Vec::new(),
                 timestamp: ts,
                 reasoning: m.reasoning.clone(),
             });
         }
         Some(self.messages.len())
+    }
+
+    /// Collapse internal background wake prompts for display. The stored
+    /// row keeps the full result/log for the model; the chat shows only
+    /// the first line plus where to find detail.
+    pub(crate) fn collapse_wake_for_display(role: &str, content: &str) -> String {
+        if role != "system" {
+            return content.to_string();
+        }
+        let (prefix, hint) = if content.starts_with("[background subagent finished]") {
+            (
+                "[background subagent finished]",
+                " (full result folded into follow-up — /agents for detail)",
+            )
+        } else if content.starts_with("[background task finished]") {
+            (
+                "[background task finished]",
+                " (log folded into follow-up — /tasks for log)",
+            )
+        } else {
+            return content.to_string();
+        };
+        let first = content.lines().next().unwrap_or(prefix);
+        format!("{first}{hint}")
     }
 
     pub(crate) fn parse_compact_freed(msg: &str) -> usize {
@@ -365,5 +396,31 @@ mod tests {
         app.ctx_freed_tokens +=
             App::parse_compact_freed("Compacted context: 40→20 msgs, freed ~3k tokens");
         assert_eq!(app.ctx_freed_tokens, 3_000);
+    }
+
+    #[test]
+    fn wake_prompts_collapse_for_display() {
+        let long = "[background subagent finished] 6d420000 (explore) done.\nTask was: Explore X\nResult:\n## huge tables |||...\nContinue from where you left off; do not restart.";
+        let shown = App::collapse_wake_for_display("system", long);
+        assert!(
+            shown.starts_with("[background subagent finished] 6d420000"),
+            "{shown:?}"
+        );
+        assert!(shown.contains("/agents for detail"), "{shown:?}");
+        assert!(
+            !shown.contains("huge tables"),
+            "result body hidden: {shown:?}"
+        );
+        assert!(!shown.contains("Continue from where"), "{shown:?}");
+
+        let task = "[background task finished] abc123 (`cargo test`) done (exit 0).\nLog tail:\nline1\nline2\nContinue from where you left off;";
+        let shown = App::collapse_wake_for_display("system", task);
+        assert!(shown.contains("/tasks for log"), "{shown:?}");
+        assert!(!shown.contains("line1"), "{shown:?}");
+
+        let normal = App::collapse_wake_for_display("system", "plain notice");
+        assert_eq!(normal, "plain notice");
+        let user = App::collapse_wake_for_display("user", long);
+        assert_eq!(user, long, "only system rows collapse");
     }
 }
