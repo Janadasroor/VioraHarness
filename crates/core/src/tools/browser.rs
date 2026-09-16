@@ -478,7 +478,11 @@ pub async fn dev_serve(args: Value) -> Value {
         Some(p) => return json!({"ok": false, "error": format!("invalid port: {p}")}),
     };
     let cwd = dir_path.to_string_lossy().to_string();
-    let command = format!("python3 -m http.server {port}");
+    // Explicit loopback bind: bare `http.server {port}` resolves a
+    // dual-stack wildcard via getaddrinfo(AI_PASSIVE), which dies with
+    // `socket.gaierror: Bad value for ai_flags` inside the sandbox —
+    // the server exited 1 before chrome ever connected.
+    let command = format!("python3 -m http.server {port} --bind 127.0.0.1");
     let task = super::tasks::spawn_task(&command, &cwd);
     let mut res = super::tasks::launch_result(&task);
     res["url"] = json!(format!("http://127.0.0.1:{port}/"));
