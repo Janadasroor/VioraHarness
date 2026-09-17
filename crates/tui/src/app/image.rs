@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::clipboard::{png_from_rgba, rgba_from_png, shrink_rgba};
 use base64::Engine as _;
 

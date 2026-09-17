@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::loop_mod::AgentLoop;
 use crate::tools::ToolRegistry;
 use std::sync::Arc;
@@ -40,9 +43,8 @@ impl SubagentKind {
     }
 
     /// Model chain: explicit override > `VIORAHARNESS_SUBAGENT_MODEL` >
-    /// parent turn's model (offline-safe reuse) > `VIORAHARNESS_MODEL` >
-    /// gateway free catalog. The catalog is last because it needs network;
-    /// the error names every knob when all are missing.
+    /// parent turn's model > `VIORAHARNESS_MODEL` > gateway free catalog
+    /// (last: needs network). The error names every knob when all miss.
     pub async fn default_model_dynamic_with_parent(
         &self,
         parent_model: Option<&str>,
@@ -128,17 +130,15 @@ fn parent_mode_allow() -> Option<Vec<String>> {
         .map(|ts| ts.iter().map(|t| t.to_string()).collect())
 }
 
-/// Global cap shared by every spawn path (blocking + detached). The old
-/// code built a fresh `SubagentPool::new(4)` per blocking call, so N
-/// concurrent blocking tasks meant 4N permits — effectively unbounded.
-/// One static semaphore makes the limit real.
+/// Global cap shared by every spawn path (blocking + detached). A fresh
+/// per-call pool used to mean 4N permits for N concurrent tasks —
+/// effectively unbounded. One static semaphore makes the limit real.
 static GLOBAL_SEM: std::sync::LazyLock<Semaphore> = std::sync::LazyLock::new(|| Semaphore::new(4));
 
 /// Await a subagent future with the opt-in timeout
-/// (`VIORAHARNESS_SUBAGENT_TIMEOUT_SECS`). `None` waits indefinitely,
-/// like opencode/Claude Code — the 20-turn loop budget and per-tool
-/// timeouts are the backstops. Cancellation (`x` in /agents) works
-/// either way via the registered abort handle.
+/// (`VIORAHARNESS_SUBAGENT_TIMEOUT_SECS`). `None` waits indefinitely;
+/// the loop budget and per-tool timeouts are the backstops. Cancellation
+/// works either way via the registered abort handle.
 async fn await_subagent(
     fut: impl std::future::Future<Output = anyhow::Result<String>>,
     timeout: Option<std::time::Duration>,
@@ -155,10 +155,9 @@ async fn await_subagent(
     }
 }
 /// Parent context captured at the `task` call site (the loop injects
-/// `parent_depth`/`parent_model`/`session_id` into the tool args; direct
-/// callers use depth 0 / no model / no session). Depth drives both the
-/// tracker label and the loop's `task recursion depth exceeded` guard;
-/// the session tags the spawning chat so /agents can scope runs per chat.
+/// `parent_depth`/`parent_model`/`session_id`; direct callers use depth 0 /
+/// no model / no session). Depth drives the tracker label and the loop's
+/// recursion guard; the session scopes /agents runs per chat.
 #[derive(Debug, Clone, Default)]
 pub struct ParentCtx {
     pub depth: usize,
@@ -208,9 +207,7 @@ impl SubagentPool {
     }
 
     /// Full spawn with parent depth/model (the `task` tool path). Blocking
-    /// but cancellable: the work runs on a spawned task with its abort
-    /// handle registered, so `cancel_run`/`x` in /agents aborts it just
-    /// like a detached run. Opt-in timeout via `tracker::subagent_timeout_opt()`.
+    /// but cancellable via the registered abort handle.
     pub async fn spawn_one_full(
         &self,
         kind: SubagentKind,
@@ -229,9 +226,8 @@ impl SubagentPool {
             &mode_label,
             child_depth,
         );
-        // The transcript lives in its own session (`sub-<run id>`): Enter
-        // on the finished run opens that session as the subagent's view.
-        // The spawning chat is tagged too so /agents can scope runs per chat.
+        // Transcript session (`sub-<run id>`) + spawning-chat tag, so
+        // /agents can open the view and scope runs per chat.
         let session_id = format!("{}{}", crate::subagent::tracker::SUB_SESSION_PREFIX, run_id);
         crate::subagent::tracker::set_run_session(&run_id, &session_id);
         if let Some(parent_session) = parent.session.as_deref() {
@@ -266,12 +262,9 @@ impl SubagentPool {
     }
 
     /// Detached spawn for `task background:true`: registers the run and
-    /// drives it on the shared background pool, returning the run id
-    /// immediately. The caller's turn continues; completion lands in
-    /// `tracker::take_completions()` for the UI to surface (notice +
-    /// follow-up turn, like background bash tasks). Cancel via
-    /// `tracker::cancel_run` (`x` in /agents). Opt-in timeout via
-    /// `tracker::subagent_timeout_opt()`.
+    /// drives it on the shared background pool, returning the run id at
+    /// once. Completion lands in `tracker::take_completions()` for the UI
+    /// (notice + follow-up turn). Cancel via `tracker::cancel_run`.
     pub fn spawn_background(
         kind: SubagentKind,
         prompt: String,

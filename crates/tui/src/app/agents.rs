@@ -1,17 +1,14 @@
-//! `/agents` dialog: every active agent in one place with navigation.
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
+//! `/agents` dialog: live turn, this chat's subagents, background tasks.
 //!
-//! Rows are flat (one cursor across sections, like the Tasks panel):
-//! the live turn first, then this chat's subagent runs (active first),
-//! then background tasks (running first). Enter acts contextually:
-//! live closes, a linked subagent opens its transcript session (its own
-//! view, live or finished — running transcripts are read-only), task
-//! jumps to the Tasks panel focused on it. Unlinked legacy rows fall
-//! back to a detail post. Chats live in `/sessions` — this dialog stays
-//! scoped to the current chat so old explore sessions never crowd it.
-//! Selection is id-anchored (`AgentRow::row_id`): the list re-sorts on
-//! every rebuild, so a bare index could land on another row by Enter
-//! time. Main chat also announces each launch with its title
-//! (`poll_subagent_starts`, every event-loop tick).
+//! One cursor across sections (live first, then active-first subagents,
+//! then running-first tasks). Enter acts contextually: live closes, a
+//! linked subagent opens its (read-only) transcript, a task jumps to the
+//! Tasks panel. Scoped to the current chat — old explore sessions never
+//! crowd it; chats live in `/sessions`. Selection is id-anchored
+//! (`AgentRow::row_id`) because the list re-sorts on every rebuild.
 
 use super::*;
 use vioraharness_core::subagent::tracker::{self, SubagentRun};
@@ -38,13 +35,9 @@ impl AgentRow {
     }
 }
 
-/// Flattened selectable rows: live turn, this chat's subagents (active
-/// first), background tasks (running first). The subagent section is
-/// scoped to the current chat (or the originating chat while peeking at
-/// a transcript) via each run's parent link — other chats' runs never
-/// crowd this dialog. Recent chats are intentionally excluded (use
-/// `/sessions`); that section is what made repeated explore sessions
-/// look like agent spam.
+/// Selectable rows: live turn, this chat's subagents (active first),
+/// background tasks (running first). Subagents are scoped to the current
+/// chat via each run's parent link; recent chats are excluded (`/sessions`).
 pub(crate) fn agent_rows(app: &App) -> Vec<AgentRow> {
     let mut rows = vec![AgentRow::Live];
     let scope = app.agents_scope_session();
@@ -71,16 +64,13 @@ pub(crate) fn age_str(secs: i64) -> String {
 }
 
 impl App {
-    /// Drain finished background subagents (`task background:true`):
-    /// chat notice + desktop alert always, follow-up turn with the
-    /// result when idle (mirrors background bash tasks). Runs every
-    /// event-loop iteration; each completion drains once. Returns the
-    /// waked run ids. Notices persist into the parent chat so an
-    /// Esc-return (store reload) keeps them instead of going blank.
+    /// Drain finished background subagents (`task background:true`) into
+    /// chat notices + desktop alerts, with a follow-up turn carrying the
+    /// result when idle. Each completion drains once; notices persist so
+    /// store reloads (Esc-return) keep them instead of going blank.
     pub(crate) fn poll_subagent_completions(&mut self) -> Vec<String> {
-        // Subagent transcript views are read-only peeks: never drain the
-        // global completion queue here. Draining marks runs surfaced, so
-        // the main chat would lose its finish notice + follow-up turn.
+        // Read-only peek: draining here would mark runs surfaced, so the
+        // main chat would lose its finish notice + follow-up turn.
         // Completions wait until Esc returns to the main session.
         if self.viewing_subagent() {
             return Vec::new();
@@ -96,10 +86,9 @@ impl App {
                 tracker::SubagentStatus::Killed => ("⑂○", false),
                 tracker::SubagentStatus::Running => continue,
             };
-            // Runs that finished before first sight (pre-boot history,
-            // missed launch ticks) never got a launch line — post it now
-            // so the completion below doesn't dangle without context.
-            // Once each: completions drain once and launches are id-set.
+            // Unseen runs (pre-boot history, missed ticks) never got a
+            // launch line — post it so the completion has context. Once
+            // each: completions drain once, launches are id-set.
             if self.seen_subagents.insert(done.id.clone()) {
                 let title: String = done.prompt_preview.chars().take(100).collect();
                 let launch = format!(
@@ -142,8 +131,8 @@ impl App {
                 self.wake_for_subagent(&done);
                 waked.push(done.id.clone());
             }
-            // Busy: notice only, like task wakes — the persisted chat
-            // notice carries the outcome into the next turn.
+            // Busy: notice only; the persisted notice carries the outcome
+            // into the next turn.
         }
         waked
     }
@@ -275,9 +264,8 @@ impl App {
         self.scroll = 0;
     }
 
-    /// Re-anchor the cursor id to the current index after any move.
-    /// Moves are relative (±1/page) so the index is right at move time;
-    /// the id is what keeps Enter honest when the list re-sorts later.
+    /// Re-anchor the cursor id after a move. Moves are relative so the
+    /// index is right at move time; the id keeps Enter honest across re-sorts.
     pub(crate) fn anchor_agent_cursor(&mut self) {
         let rows = agent_rows(self);
         if rows.is_empty() {
@@ -288,9 +276,8 @@ impl App {
         self.agent_cursor_id = rows.get(self.agent_cursor).map(|r| r.row_id());
     }
 
-    /// Resolve the highlighted row: prefer the anchored id against fresh
-    /// rows, fall back to the clamped index when the row is gone
-    /// (eviction/prune) or was never anchored (older flows, tests).
+    /// Resolve the highlighted row: anchored id first, clamped index when
+    /// the row is gone (eviction/prune) or was never anchored.
     pub(crate) fn resolve_agent_row(&mut self) -> Option<AgentRow> {
         let rows = agent_rows(self);
         if rows.is_empty() {
@@ -321,13 +308,10 @@ impl App {
         self.agent_cursor.min(rows.len() - 1)
     }
 
-    /// Announce newly-launched subagents in main chat with their title
-    /// (prompt preview), so a spawn is visible without opening /agents.
-    /// Runs every event-loop iteration. History hydrated from sqlite is
-    /// never announced: only runs started after boot qualify, and each
-    /// id announces once. Scoped to this chat (unattributed probes still
-    /// show); other chats' runs surface when their own chat polls.
-    /// Notices persist so an Esc-return reload keeps them.
+    /// Announce newly-launched subagents in main chat (kind + prompt
+    /// preview) so spawns are visible without opening /agents. Only runs
+    /// started after boot qualify, each announces once, scoped to this
+    /// chat; notices persist across store reloads.
     pub(crate) fn poll_subagent_starts(&mut self) {
         // Read-only peek: launch announcements belong to the main chat.
         // Posting them here would pollute the transcript being viewed.
@@ -356,10 +340,8 @@ impl App {
     }
 
     /// Best-effort persist of an in-memory system notice into the current
-    /// chat, so store reloads (Esc-return from a transcript, resume)
-    /// keep what the live view showed. Skips when the session isn't in
-    /// the store (tests, transient views) — the in-memory message is
-    /// already posted either way.
+    /// chat, so store reloads keep what the live view showed. Skips when
+    /// the session isn't in the store (tests, transient views).
     pub(crate) fn persist_system_notice(&self, text: &str) {
         let db = std::env::var("VIORAHARNESS_DB")
             .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());
@@ -370,16 +352,15 @@ impl App {
         }
     }
 
-    /// True while viewing any subagent transcript (`sub-` session): input
-    /// stays hidden and all turns are refused — only the main agent owns
-    /// the input box. Holds even after the run finishes; Esc returns.
+    /// True while viewing a subagent transcript (`sub-` session): input
+    /// hidden, turns refused — only the main agent owns input, even after
+    /// the run finishes. Esc returns.
     pub(crate) fn viewing_subagent(&self) -> bool {
         self.session_id.starts_with(tracker::SUB_SESSION_PREFIX)
     }
 
-    /// Chat whose subagents the /agents dialog lists: the current chat,
-    /// or the originating chat while peeking at a subagent transcript
-    /// (so the dialog stays useful instead of going empty mid-peek).
+    /// Chat whose subagents /agents lists: current chat, or the originating
+    /// chat while peeking at a transcript (so the dialog never goes empty).
     pub(crate) fn agents_scope_session(&self) -> &str {
         if self.viewing_subagent() {
             self.return_session.as_deref().unwrap_or(&self.session_id)
@@ -388,14 +369,11 @@ impl App {
         }
     }
 
-    /// Live-refresh the open subagent transcript (called every event-loop
-    /// tick). The view loads once on Enter, but a running subagent keeps
-    /// appending to its session in the store — without this the view looks
-    /// frozen until the user leaves and re-enters. Reloads at most once
-    /// per second while the linked run is still Running, plus one final
-    /// reload when it lands. Scroll position is preserved (draw_chat holds
-    /// scrolled-up views steady); refuses nothing, mutates only this view.
-    /// Returns true when the view changed and needs a redraw.
+    /// Live-refresh the open subagent transcript (every event-loop tick).
+    /// The view loads once on Enter but a running subagent keeps appending
+    /// to the store — without this it looks frozen. Reloads at most once
+    /// per second while Running, plus one final reload on landing. Scroll
+    /// is preserved; only this view mutates. Returns true when redrawn.
     pub(crate) fn poll_subview_refresh(&mut self) -> bool {
         if !self.viewing_subagent() {
             return false;
@@ -430,19 +408,16 @@ impl App {
                 None => "subagent transcript — read-only, no input (Esc back to main)".into(),
             };
         }
-        // Tool results can land under an existing message row (same count,
-        // richer items) — redraw whenever the run is still live. The
-        // finishing transition also redraws (status flips to done) even
-        // with no new rows: the result already streamed in while live.
+        // Tool results can land under an existing row (same count, richer
+        // items) — redraw while live, and on the finishing transition
+        // (status flips) even with no new rows.
         running || finishing || self.messages.len() != before
     }
 
-    /// Enter on the highlighted Agents row: contextual navigation.
-    /// Id-anchored (see `resolve_agent_row`): entering a subagent can
-    /// never land on Live just because the list re-sorted. A linked run
-    /// opens its transcript session — the subagent's own view, always
-    /// read-only with no input box (Esc returns). Rows from before the
-    /// session link fall back to the detail post.
+    /// Enter on the highlighted row: contextual navigation, id-anchored
+    /// (see `resolve_agent_row`). A linked run opens its read-only
+    /// transcript (Esc returns); rows without a session link fall back
+    /// to the detail post.
     pub(crate) fn agents_activate(&mut self) {
         let Some(row) = self.resolve_agent_row() else {
             return;
@@ -627,8 +602,8 @@ mod tests {
         let mut app = test_app();
         tracker::set_run_parent(&id, &app.session_id);
         app.popup = Popup::Agents;
-        // Rows rebuild inside activate; a concurrent spawn from another
-        // test can shift indices between snapshot and use — verify.
+        // Rows rebuild inside activate and parallel tests can shift
+        // indices between snapshot and use — resolve + verify in a loop.
         let mut ok = false;
         for _ in 0..20 {
             let rows = agent_rows(&app);
@@ -664,9 +639,8 @@ mod tests {
         let live = tasks::spawn_task("sleep 30", "/tmp");
         let mut app = test_app();
         app.popup = Popup::Agents;
-        // The task registry is shared with parallel tests: another
-        // spawn landing between the cursor snapshot and activation can
-        // shift indices, so resolve + verify in a short retry loop.
+        // The task registry is shared with parallel tests, which can shift
+        // indices between snapshot and activation — resolve + verify in a loop.
         let mut focused = false;
         for _ in 0..20 {
             let rows = agent_rows(&app);
@@ -751,9 +725,8 @@ mod tests {
     #[tokio::test]
     async fn subagent_completion_wakes_idle_chat() {
         let _lock = completion_lock();
-        // Stale undrained completions from sibling tests would wake first
-        // (the first wake flips busy, the rest get notice-only in the same
-        // poll) — clear the backlog so ours is the waker.
+        // Stale undrained completions from sibling tests would wake first —
+        // clear the backlog so ours is the waker.
         let _ = tracker::take_completions();
         let (id, _) = tracker::track_start("coder", &unique_prompt("wake"), "eda");
         tracker::track_finish(&id, true, "the answer is 42");
@@ -996,11 +969,10 @@ mod tests {
 
     #[test]
     fn subview_defers_completions_and_launches_to_main() {
-        // Regression for the "messy texts" report: peeking at a subagent
-        // transcript while a run finishes must not drain the global queues
-        // into the peeked view (draining marks runs surfaced, so the main
-        // chat would lose its notice + follow-up turn, and the notice text
-        // would mix two transcripts on one screen).
+        // Peeking at a transcript while a run finishes must not drain the
+        // global queues into the peeked view (draining marks runs surfaced:
+        // main would lose its notice + follow-up, and two transcripts'
+        // text would mix on one screen).
         let _lock = completion_lock();
         let prompt = unique_prompt("defer");
         let (id, _) = tracker::track_start("explore", &prompt, "eda");
@@ -1025,9 +997,8 @@ mod tests {
 
     #[test]
     fn subview_refuses_system_turns_too() {
-        // Follow-up wakes (task/subagent completions) must wait for the
-        // return to main: starting one here would persist main-chat
-        // content into the sub session.
+        // Follow-up wakes must wait for the return to main: starting one
+        // here would persist main-chat content into the sub session.
         let mut app = test_app();
         app.session_id = "sub-sa_sysref1".into();
         assert!(app.viewing_subagent());
@@ -1131,10 +1102,9 @@ mod tests {
 
     #[test]
     fn dialog_excludes_recent_chats() {
-        // Regression for "why i see all of these": repeated explore
-        // sessions in the same project used to fill /agents with 8 chat
-        // rows. Chats live in /sessions now — this dialog is live +
-        // this chat's subagents + tasks only.
+        // Repeated explore sessions in the same project used to fill
+        // /agents with chat rows. Chats live in /sessions now — this
+        // dialog is live + this chat's subagents + tasks only.
         let (_env, db) = agents_env("nochats");
         let _lock = completion_lock();
         let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();
@@ -1169,9 +1139,8 @@ mod tests {
 
     #[test]
     fn subagent_notices_persist_and_survive_reload() {
-        // Regression for "navigate to sub and back, launch lines
-        // disappear": notices were in-memory only, so the Esc-return
-        // reload wiped them. They now persist into the parent chat.
+        // Notices were in-memory only, so the Esc-return reload wiped them.
+        // They now persist into the parent chat.
         let (_env, db) = agents_env("notices");
         let _lock = completion_lock();
         let store = vioraharness_core::session::SessionStore::new(db.to_str().unwrap()).unwrap();

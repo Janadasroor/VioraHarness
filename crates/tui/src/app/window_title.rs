@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Terminal window title follows the chat session.
 //!
 //! Terminals show the shell path by default; while the TUI runs we set

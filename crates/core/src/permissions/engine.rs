@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::oneshot;

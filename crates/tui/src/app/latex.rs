@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 pub(crate) fn latex_symbol(name: &str) -> Option<&'static str> {
     Some(match name {
         "alpha" => "α",

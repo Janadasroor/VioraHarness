@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::latex::{
     render_display_math, render_inline_math, translate_bare_latex_chunk, translate_latex,
 };

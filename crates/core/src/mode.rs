@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Agent modes: named tool allowlists + focused system prompt.
 //!
 //! A mode answers "what kind of work is this session for?" and trims the
@@ -73,10 +76,10 @@ const ANDROID_TOOLS: &[&str] = &[
 pub struct Mode {
     pub name: &'static str,
     pub description: &'static str,
-    /// Hex accent (`#rrggbb`) for the mode's UI label. Android is green.
+    /// Hex accent (`#rrggbb`) for the mode's UI label.
     pub accent: &'static str,
-    /// None = full registry (today's behavior). Some(list) = the model
-    /// only sees these tools, and anything else fails closed at dispatch.
+    /// None = full registry. Some(list) = the model only sees these tools,
+    /// and anything else fails closed at dispatch.
     pub tools: Option<&'static [&'static str]>,
     /// Skills force-loaded whenever the mode is active (in addition to
     /// intent-triggered skills, which are gated to this set).

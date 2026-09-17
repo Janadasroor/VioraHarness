@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 pub(crate) fn cmd_gc(days: u64, dry_run: bool) -> anyhow::Result<()> {
     let db = std::env::var("VIORAHARNESS_DB")
         .unwrap_or_else(|_| "~/.local/share/vioraharness/sessions.db".into());

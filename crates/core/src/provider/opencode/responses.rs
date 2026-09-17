@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::{ChatRequest, Provider, ProviderEvent};
 use super::convert::chat_to_responses_body;
 use super::routing::{coalesce_pending, send_with_retry};

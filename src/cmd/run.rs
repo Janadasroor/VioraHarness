@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::cli::{last_tui_model, resolve_continue};
 
 pub(crate) async fn cmd_run(

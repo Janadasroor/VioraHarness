@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use std::path::Path;
 
 pub fn is_bwrap_available() -> bool {

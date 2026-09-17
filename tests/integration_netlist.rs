@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use vioraharness_core::tools;
 
 /// Skip-gate: true when a `viora` binary is reachable via `VIORA_BIN` or

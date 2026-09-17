@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 /// Run a short diagnostic probe: Some((success, stdout)) or None on spawn
 /// failure / timeout. Callers check success themselves so a missing binary
 /// (non-zero exit) reads as "not found". Never blocks doctor.

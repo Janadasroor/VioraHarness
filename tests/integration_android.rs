@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use vioraharness_core::tools;
 
 // Skip-gate: true when an `adb` binary is reachable via ADB_BIN,

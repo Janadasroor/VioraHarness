@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 pub mod context;
 #[path = "loop/mod.rs"]
 pub mod loop_mod;

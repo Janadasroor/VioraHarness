@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::msg::truncate_chars;
 
 pub(crate) const PASTE_CHIP_LINES: usize = 8;

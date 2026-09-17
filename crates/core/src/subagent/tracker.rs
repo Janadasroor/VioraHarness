@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Live registry of subagent executions (`task` tool).
 //!
 //! Subagents run synchronously inside the turn that spawned them, so
@@ -67,9 +70,8 @@ pub struct SubagentRun {
     /// Always written on finish (best-effort); survives restarts.
     pub log_path: Option<String>,
     /// Chat session holding this run's transcript (`sub-<run id>`).
-    /// Enter on a finished run opens this session: the subagent's own
-    /// view instead of a summary buried in main chat. `None` for rows
-    /// from before the link existed.
+    /// Enter on a finished run opens this session instead of a summary
+    /// buried in main chat. `None` for rows from before the link existed.
     pub session_id: Option<String>,
     /// Chat session that spawned this run (the `task` tool caller's
     /// `session_id`). The /agents dialog lists only the current chat's
@@ -121,12 +123,10 @@ fn take_chars(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
 }
 
-/// Timeout for one subagent run, if any. Env override
-/// `VIORAHARNESS_SUBAGENT_TIMEOUT_SECS` is opt-in: a positive integer
-/// bounds the run, anything else (unset, garbage, 0) means no timeout —
-/// subagents run unbounded like opencode/Claude Code. Backstops remain:
-/// the 20-turn loop budget plus per-tool timeouts (bash 120s, chrome
-/// 60s), and `x` in /agents cancels any run.
+/// Timeout for one subagent run, if any. `VIORAHARNESS_SUBAGENT_TIMEOUT_SECS`
+/// is opt-in: positive bounds the run, anything else (unset included) means
+/// unbounded like opencode/Claude Code. Backstops remain: the 20-turn loop
+/// budget, per-tool timeouts, and `x` in /agents.
 pub fn subagent_timeout_opt() -> Option<std::time::Duration> {
     let secs = std::env::var("VIORAHARNESS_SUBAGENT_TIMEOUT_SECS")
         .ok()
@@ -136,8 +136,8 @@ pub fn subagent_timeout_opt() -> Option<std::time::Duration> {
 }
 
 /// On-disk log for a run, mirroring background-task logs
-/// (`~/.local/share/vioraharness/logs/sa_<id>.log`). Best-effort: parent
-/// dirs are created, failures are ignored by the caller.
+/// (`~/.local/share/vioraharness/logs/<id>.log`). Best-effort: parent
+/// dirs are created, write failures are ignored by the caller.
 pub fn log_path_for(id: &str) -> String {
     let base = std::env::var("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
@@ -317,12 +317,11 @@ fn persist_snapshot(id: &str) {
     }
 }
 
-/// Merge persisted rows into memory (once per DB path). Recovered rows
-/// are SILENT history: `notified` is forced on so a restart never
-/// re-posts old error notices nor fires follow-up ("working without a
-/// prompt") turns for work from a dead process. Rows still marked
-/// `running` died with their process: flip them to `error` ("interrupted
-/// by restart") — inspectable in /agents, never announced.
+/// Merge persisted rows into memory (once per DB path). Recovered rows are
+/// SILENT history: `notified` is forced on so a restart never re-posts old
+/// notices nor fires follow-up turns for a dead process. Rows still marked
+/// `running` died with their process: flip to `error` ("interrupted by
+/// restart") — inspectable in /agents, never announced.
 fn hydrate_runs() {
     let Some(db_path) = persist_db_path() else {
         return;
@@ -392,8 +391,8 @@ fn hydrate_runs() {
                 run.result_full = Some("interrupted by restart (process exited)".into());
                 corrected.push(run.clone());
             }
-            // Silent history (see doc): never notify/wake for a life that
-            // ended before this process booted.
+            // Silent history: never notify/wake for a life that ended
+            // before this process booted.
             run.notified = true;
             runs.push_back(run);
         }
@@ -401,10 +400,9 @@ fn hydrate_runs() {
             runs.pop_front();
         }
     }
+    // The clone was taken before `notified` was forced on above — set it
+    // here so the persisted flip stays silent (never drains after restart).
     for mut run in corrected {
-        // Persist the interruption flip; notified stays as hydrated (the
-        // write-through below only persists notified for drained runs, and
-        // these never drain).
         run.notified = true;
         persist_run(&run);
     }
@@ -471,11 +469,9 @@ fn track_start_inner(
     (id, depth)
 }
 
-/// Record completion. Unknown ids are ignored (never panic on a
-/// bookkeeping path). The full result is spilled to `log_path_for(id)`
-/// (best-effort, capped at `LOG_FULL_CHARS`); `result_full` keeps the
-/// first `RESULT_FULL_CHARS` and `result_truncated` marks the cut so the
-/// UI can point at the log instead of silently dropping output.
+/// Record completion. Unknown ids are ignored. The full result spills to
+/// `log_path_for(id)` (best-effort, capped); `result_full` keeps the head
+/// and `result_truncated` marks the cut so the UI can point at the log.
 pub fn track_finish(id: &str, ok: bool, result: &str) {
     let truncated = result.chars().count() > RESULT_FULL_CHARS;
     let preview = take_chars(result, RESULT_CHARS);
@@ -534,10 +530,9 @@ pub fn take_completions() -> Vec<SubagentRun> {
 }
 
 /// Scoped drain: only runs belonging to `scope` surface. A run belongs
-/// when it has no parent link yet (legacy/test probes, spawn race) or
-/// its parent is the scoped chat. Other chats' runs stay un-notified so
-/// they surface when their own chat polls — without this a completion
-/// would post (and persist) into whatever chat happens to be open.
+/// when it has no parent link yet (legacy/test probes, spawn race) or its
+/// parent is the scoped chat. Others stay un-notified until their own chat
+/// polls — otherwise a completion would post into whatever chat is open.
 pub fn take_completions_for(scope: Option<&str>) -> Vec<SubagentRun> {
     hydrate_runs();
     let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());
@@ -601,8 +596,7 @@ pub fn set_run_session(id: &str, session_id: &str) {
 
 /// Link a run to the chat session that spawned it (pool internal, right
 /// after spawn, from the `task` tool's injected `session_id`). The
-/// /agents dialog lists only the current chat's runs. Same write-through
-/// contract as the transcript link above.
+/// /agents dialog lists only the current chat's runs.
 pub fn set_run_parent(id: &str, parent_session: &str) {
     {
         let mut runs = RUNS.lock().unwrap_or_else(|e| e.into_inner());

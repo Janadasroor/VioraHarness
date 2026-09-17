@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use anyhow::Result;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;

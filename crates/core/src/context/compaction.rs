@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::provider::{ChatMessage, ChatRequest, Provider};
 use crate::session::SessionStore;
 
@@ -118,7 +121,8 @@ pub fn plan_compaction(rows: &[(i64, String, String)], keep_tail: usize) -> Opti
         return None;
     }
 
-    // safety net still guards anything ragged left behind).
+    // Start the kept tail at a clean boundary, never mid tool-call/result
+    // (sanitize_tool_contiguity is the safety net for anything ragged).
     let mut start = visible.len() - keep_tail;
     while start < visible.len() && visible[start].1 == "tool" {
         start += 1;

@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Free-tier gateway shim for clients that only accept URL + API key.
 //!
 //! Forwards OpenAI-compatible requests to the Zen gateway while injecting

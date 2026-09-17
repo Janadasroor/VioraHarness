@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::{ChatRequest, Provider, ProviderEvent};
 use super::routing::send_with_retry;
 use super::*;

@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Android device tools: `adb` subcommands, emulator control, Gradle builds.
 //!
 //! Probed live 2026-09-14 against adb 1.0.41 + emulator-5554 (Pixel Tablet,

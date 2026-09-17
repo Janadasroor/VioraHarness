@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Reasoning-depth dial ("thinking level"): one setting, every provider.
 //!
 //! Levels form a fixed spectrum from cheapest to deepest:

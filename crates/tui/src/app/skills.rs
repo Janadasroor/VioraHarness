@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 pub(crate) fn render_skill_file(name: &str, description: &str, triggers: &[String]) -> String {
     let trig = if triggers.is_empty() {
         "[]".to_string()

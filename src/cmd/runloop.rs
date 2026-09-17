@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::cli::last_tui_model;
 use vioraharness_core::runloop::{run_batch, BatchOptions, LoopExecutor};
 

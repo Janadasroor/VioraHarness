@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::loop_mod::{split_shell_segments, strip_wrappers, wants_detach};
 use serde_json::{json, Value};
 use std::time::Duration;

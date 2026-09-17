@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 
 pub(crate) fn bash_command(args_str: &str) -> String {

@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 //! Desktop notifications for moments that need the user's eyes:
 //! turn done/failed, permission/question prompts, background task
 //! completions.

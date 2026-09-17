@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use clap::Parser;
 use cli::{rotate_log_if_big, Cli, Commands};
 use cmd::run::cmd_run;

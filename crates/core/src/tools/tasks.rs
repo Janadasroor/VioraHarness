@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -417,7 +420,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_evicts_oldest_finished_first() {
-        // handful, all finished. Invariant: finished entries stay bounded
+        // Invariant: finished entries stay bounded
 
         let mut mine = Vec::new();
         for i in 0..60 {

@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 pub(crate) const ZEN_BASE: &str = "https://opencode.ai/zen/v1";
 pub(crate) const GO_BASE: &str = "https://opencode.ai/zen/go/v1";
 

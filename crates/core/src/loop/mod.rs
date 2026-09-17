@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::context::{assemble_context, compaction};
 use crate::permissions::{decide, rules_from_json, Decision, Rule};
 use crate::provider::{ChatMessage, ChatRequest, ProviderEvent, ToolDefForProvider};
@@ -31,11 +34,10 @@ pub struct AgentLoop {
     /// turn and pushes while it runs; `run_inner` drains it at turn
     /// boundaries. Unused (always empty) for server-spawned loops.
     pub injector: Injector,
-    /// Suppress the headless stdout streaming (`print!` of text deltas).
-    /// The subagent pool sets this: a background subagent sharing the
-    /// process with the TUI must never write raw deltas to stdout — that
-    /// corrupts the alternate screen (TUI vanishes, raw markdown flows).
-    /// Headless `run` leaves it false so turns still stream to the terminal.
+    /// Suppress headless stdout streaming (`print!` of text deltas). The
+    /// subagent pool sets this: a background subagent sharing the process
+    /// with the TUI must never write raw deltas to stdout — that corrupts
+    /// the alternate screen. Headless `run` leaves it false.
     pub quiet_stdout: bool,
 }
 
@@ -193,8 +195,7 @@ impl AgentLoop {
             .await
     }
 
-    // Turn entry: prompt + routing + streaming + image + role travel
-    // together (8 args by construction).
+    // Turn entry: prompt + routing + streaming + image + role travel together.
     #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
@@ -286,8 +287,8 @@ impl AgentLoop {
             )
         };
         messages.push(user_msg.clone());
-        // Safety net: history must keep tool contiguity (every assistant
-
+        // Safety net: history must keep tool contiguity (assistant
+        // tool_calls always paired with their results).
         sanitize_tool_contiguity(&mut messages);
 
         if let Some(ref s) = store {
@@ -779,12 +780,8 @@ impl AgentLoop {
                             .or_insert(Value::String(id.clone()));
                         if name == "task" {
                             // Parent context for the subagent pool: explicit
-                            // depth (the pool labels child_depth =
-                            // parent+1 and runs the loop at that depth so
-                            // the recursion guard fires) and parent model
-                            // (offline fallback — the pool prefers an
-                            // explicit `model:` override and
-                            // VIORAHARNESS_SUBAGENT_MODEL first).
+                            // depth (child = parent+1, so the recursion guard
+                            // fires) and parent model (offline fallback).
                             // `model` from the LLM stays the override.
                             obj.entry("parent_depth".to_string())
                                 .or_insert(json!(depth));
@@ -918,11 +915,9 @@ impl AgentLoop {
                                             Ok(crate::permissions::InteractiveDecision::AllowAlways) => {
 
                                                 persist_allow_always(&name, &args_str);
-                                                // The file changed mid-turn but
-                                                // the rules above were read from
-                                                // the lock — reload it so the
-                                                // grant covers the rest of THIS
-                                                // turn, not just the next one.
+                                                // Rules were read from the lock before the
+                                                // file changed — reload so the grant covers
+                                                // the rest of THIS turn, not just the next.
                                                 if let Ok(mut rules) = self.rules.write() {
                                                     *rules = load_rules_from_config();
                                                 }
@@ -1180,10 +1175,9 @@ mod tests {
 
     #[test]
     fn allow_always_reload_takes_effect_same_turn() {
-        // Regression: "Allow always" persisted to vioraharness.json but
-        // the running turn kept its startup snapshot, so the next
-        // same-family command in THAT turn asked again. The AllowAlways
-        // branch now reloads the lock — simulate exactly that.
+        // "Allow always" persisted but the running turn kept its startup
+        // snapshot, so same-family commands asked again mid-turn. The
+        // AllowAlways branch now reloads the lock — simulate exactly that.
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("VIORAHARNESS_CONFIG").ok();
         let dir = std::env::temp_dir().join(format!("vh-perm-test-{}", std::process::id()));

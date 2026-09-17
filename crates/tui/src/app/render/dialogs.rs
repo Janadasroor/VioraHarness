@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use super::super::popups::rewind_checkpoints;
 use super::super::*;
 use crate::theme::Theme;
@@ -1163,7 +1166,7 @@ impl App {
                     " ↑/↓ navigate • Enter full text • c clear • Esc close ",
                     Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
                 )));
-                } // else (non-empty list)
+                }
                 lines
             }
             Popup::Rewind => {
@@ -1306,7 +1309,7 @@ impl App {
                         ("esc", "Cancel"),
                     ]));
                 }
-                } // else (has checkpoints)
+                }
                 lines
             }
             Popup::Settings => {

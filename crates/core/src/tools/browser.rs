@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 

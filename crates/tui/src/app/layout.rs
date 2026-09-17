@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
 pub(crate) fn hit_rect(area: Rect, mx: u16, my: u16) -> bool {

@@ -1,3 +1,6 @@
+// Copyright 2026 Janada Sroor
+// SPDX-License-Identifier: Apache-2.0
+
 pub fn is_docker_available() -> bool {
     std::process::Command::new("docker")
         .arg("--version")
