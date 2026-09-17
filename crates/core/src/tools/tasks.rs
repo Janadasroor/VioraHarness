@@ -388,54 +388,78 @@ mod tests {
         assert!(read_task_log("nope").is_none());
     }
 
-    // TEMPORARY CI DIAGNOSTIC — remove once the Windows `echo` failure is
-    // understood (background echo tasks report Error on windows-latest).
+    // TEMPORARY CI DIAGNOSTIC — remove once the Windows background-task
+    // failure is understood (direct bash works, tasks-spawned bash exits 1
+    // silent). Bisects cwd vs stdio vs spawn path.
     #[tokio::test]
     async fn dbg_win_shell_diag() {
         use std::fmt::Write as _;
         let mut out = String::new();
         let bp = crate::tools::bash::bash_program();
-        writeln!(out, "bash_program={bp}").unwrap();
-        writeln!(
-            out,
-            "cwd={:?} tmp={:?}",
-            std::env::current_dir(),
-            std::env::temp_dir()
-        )
-        .unwrap();
-        writeln!(
-            out,
-            "gitbash_exists={}",
-            std::path::Path::new("C:\\Program Files\\Git\\bin\\bash.exe").exists()
-        )
-        .unwrap();
-        match tokio::process::Command::new(&bp)
-            .args(["-c", "echo diag-ok; exit 42"])
+        // Compile-time dir: another test thread may chdir the process
+        // mid-run (snapshot tests do), so never snapshot current_dir here.
+        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let tmp = std::env::temp_dir();
+        writeln!(out, "bash={bp} repo={repo:?} tmp={tmp:?}").unwrap();
+        // A: direct spawn, repo cwd, piped stdio (known good per prior run).
+        let a = tokio::process::Command::new(&bp)
+            .args(["-c", "echo A-ok; exit 11"])
             .output()
             .await
+            .map(|o| {
+                (
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stdout).to_string(),
+                )
+            })
+            .map_err(|e| e.to_string());
+        writeln!(out, "A direct/repo/pipe: {a:?}").unwrap();
+        // B: direct spawn, temp cwd, piped stdio.
+        let b = tokio::process::Command::new(&bp)
+            .args(["-c", "echo B-ok; exit 22"])
+            .current_dir(&tmp)
+            .output()
+            .await
+            .map(|o| {
+                (
+                    o.status.code(),
+                    String::from_utf8_lossy(&o.stdout).to_string(),
+                )
+            })
+            .map_err(|e| e.to_string());
+        writeln!(out, "B direct/tmp/pipe: {b:?}").unwrap();
+        // C: direct spawn, temp cwd, stdout to a temp file (like tasks).
+        let tmplog = tmp.join("vh-diag-echo.log");
+        let c = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&tmplog)
         {
-            Ok(o) => writeln!(
-                out,
-                "direct: code={:?} stdout={:?} stderr={:?}",
-                o.status.code(),
-                String::from_utf8_lossy(&o.stdout),
-                String::from_utf8_lossy(&o.stderr)
-            )
-            .unwrap(),
-            Err(e) => writeln!(out, "direct spawn err: {e}").unwrap(),
-        }
-        let workdir = std::env::temp_dir().to_string_lossy().into_owned();
-        let t = spawn_task("echo bg-via-bash", &workdir);
+            Ok(f) => tokio::process::Command::new(&bp)
+                .args(["-c", "echo C-ok; exit 33"])
+                .current_dir(&tmp)
+                .stdout(std::process::Stdio::from(f))
+                .stderr(std::process::Stdio::null())
+                .status()
+                .await
+                .map(|s| s.code())
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(format!("log open failed: {e}")),
+        };
+        writeln!(out, "C direct/tmp/file: {c:?}").unwrap();
+        // D: tasks::spawn with the REPO cwd (valid, no tilde/temp).
+        let t = spawn_task("echo D-ok", &repo.to_string_lossy());
         let done = wait_for(&t.id, 15000).await;
         writeln!(
             out,
-            "task: status={:?} exit={:?} log={}",
-            done.status, done.exit_code, done.log_path
+            "D tasks/repo: status={:?} exit={:?}",
+            done.status, done.exit_code
         )
         .unwrap();
         if let Ok(log) = std::fs::read_to_string(&done.log_path) {
-            writeln!(out, "log: {log:?}").unwrap();
+            writeln!(out, "D log: {log:?}").unwrap();
         }
+        let _ = std::fs::remove_file(&tmplog);
         assert_eq!(
             done.status,
             BgStatus::Done,
