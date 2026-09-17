@@ -390,7 +390,7 @@ mod tests {
 
     // TEMPORARY CI DIAGNOSTIC — remove once the Windows background-task
     // failure is understood (direct bash works, tasks-spawned bash exits 1
-    // silent). Bisects cwd vs stdio vs spawn path.
+    // silent). Bisects env vs stderr-destination.
     #[tokio::test]
     async fn dbg_win_shell_diag() {
         use std::fmt::Write as _;
@@ -400,71 +400,78 @@ mod tests {
         // mid-run (snapshot tests do), so never snapshot current_dir here.
         let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let tmp = std::env::temp_dir();
-        writeln!(out, "bash={bp} repo={repo:?} tmp={tmp:?}").unwrap();
-        // A: direct spawn, repo cwd, piped stdio (known good per prior run).
-        let a = tokio::process::Command::new(&bp)
-            .args(["-c", "echo A-ok; exit 11"])
+        // E: direct + QT_QPA (the only env delta tasks-spawn adds).
+        let e = tokio::process::Command::new(&bp)
+            .args(["-c", "echo E-ok; exit 51"])
+            .current_dir(&repo)
+            .env("QT_QPA_PLATFORM", "offscreen")
             .output()
             .await
             .map(|o| {
                 (
                     o.status.code(),
                     String::from_utf8_lossy(&o.stdout).to_string(),
+                    String::from_utf8_lossy(&o.stderr).to_string(),
                 )
             })
             .map_err(|e| e.to_string());
-        writeln!(out, "A direct/repo/pipe: {a:?}").unwrap();
-        // B: direct spawn, temp cwd, piped stdio.
-        let b = tokio::process::Command::new(&bp)
-            .args(["-c", "echo B-ok; exit 22"])
-            .current_dir(&tmp)
-            .output()
-            .await
-            .map(|o| {
-                (
-                    o.status.code(),
-                    String::from_utf8_lossy(&o.stdout).to_string(),
-                )
-            })
-            .map_err(|e| e.to_string());
-        writeln!(out, "B direct/tmp/pipe: {b:?}").unwrap();
-        // C: direct spawn, temp cwd, stdout to a temp file (like tasks).
-        let tmplog = tmp.join("vh-diag-echo.log");
-        let c = match std::fs::OpenOptions::new()
+        writeln!(out, "E direct+qt/repo/pipe: {e:?}").unwrap();
+        // F: + stdout AND stderr to the same log file (tasks shape).
+        let flog = tmp.join("vh-diag-f.log");
+        let f = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&tmplog)
+            .open(&flog)
+        {
+            Ok(f) => {
+                let f2 = f.try_clone().ok();
+                tokio::process::Command::new(&bp)
+                    .args(["-c", "echo F-ok; exit 52"])
+                    .current_dir(&repo)
+                    .env("QT_QPA_PLATFORM", "offscreen")
+                    .stdout(std::process::Stdio::from(f))
+                    .stderr(
+                        f2.map(std::process::Stdio::from)
+                            .unwrap_or(std::process::Stdio::null()),
+                    )
+                    .status()
+                    .await
+                    .map(|s| s.code())
+                    .map_err(|e| e.to_string())
+            }
+            Err(e) => Err(format!("F log open failed: {e}")),
+        };
+        writeln!(out, "F direct+qt/repo/file+file: {f:?}").unwrap();
+        if let Ok(c) = std::fs::read_to_string(&flog) {
+            writeln!(out, "F log: {c:?}").unwrap();
+        }
+        // G: stdout to file, stderr null.
+        let glog = tmp.join("vh-diag-g.log");
+        let g = match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&glog)
         {
             Ok(f) => tokio::process::Command::new(&bp)
-                .args(["-c", "echo C-ok; exit 33"])
-                .current_dir(&tmp)
+                .args(["-c", "echo G-ok; exit 53"])
+                .current_dir(&repo)
+                .env("QT_QPA_PLATFORM", "offscreen")
                 .stdout(std::process::Stdio::from(f))
                 .stderr(std::process::Stdio::null())
                 .status()
                 .await
                 .map(|s| s.code())
                 .map_err(|e| e.to_string()),
-            Err(e) => Err(format!("log open failed: {e}")),
+            Err(e) => Err(format!("G log open failed: {e}")),
         };
-        writeln!(out, "C direct/tmp/file: {c:?}").unwrap();
-        // D: tasks::spawn with the REPO cwd (valid, no tilde/temp).
-        let t = spawn_task("echo D-ok", &repo.to_string_lossy());
-        let done = wait_for(&t.id, 15000).await;
-        writeln!(
-            out,
-            "D tasks/repo: status={:?} exit={:?}",
-            done.status, done.exit_code
-        )
-        .unwrap();
-        if let Ok(log) = std::fs::read_to_string(&done.log_path) {
-            writeln!(out, "D log: {log:?}").unwrap();
+        writeln!(out, "G direct+qt/repo/file+null: {g:?}").unwrap();
+        let _ = std::fs::remove_file(&flog);
+        let _ = std::fs::remove_file(&glog);
+        // Always pass off-Windows (the data is only needed where tasks
+        // fail); on Windows fail deliberately so the output is shown.
+        if cfg!(windows) {
+            panic!("DIAG:\n{out}");
         }
-        let _ = std::fs::remove_file(&tmplog);
-        assert_eq!(
-            done.status,
-            BgStatus::Done,
-            "windows shell diagnostics:\n{out}"
-        );
     }
 
     #[test]
