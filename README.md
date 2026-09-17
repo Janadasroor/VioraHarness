@@ -1,5 +1,7 @@
 # VioraHarness
 
+![ci](https://github.com/Janadasroor/VioraHarness/actions/workflows/ci.yml/badge.svg)
+
 VioraHarness is a custom coding-agent harness for **VioraEDA**, the C++20/Qt6 SPICE toolchain. It implements the full-control harness pattern: the harness owns the agent loop, tool registry, permission policy, OS sandbox, session journal, and terminal UI, while the language model (via OpenRouter, Gemini, or the managed gateway) provides reasoning only.
 
 The stack is Rust throughout, with a Ratatui terminal interface, a Tokio-based HTTP server with SSE streaming, and an SQLite-backed event-sourced session store.
