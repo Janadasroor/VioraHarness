@@ -337,7 +337,13 @@ mod tests {
         assert_eq!(t.status, BgStatus::Running);
         assert!(t.id.starts_with("task_"));
         let done = wait_for(&t.id, 5000).await;
-        assert_eq!(done.status, BgStatus::Done);
+        assert_eq!(
+            done.status,
+            BgStatus::Done,
+            "task failed: exit={:?} log={:?}",
+            done.exit_code,
+            read_task_log(&t.id)
+        );
         assert_eq!(done.exit_code, Some(0));
         let log = read_task_log(&t.id).expect("log readable");
         assert!(log.contains("hello-bg"), "stdout in log: {log:?}");
@@ -360,7 +366,13 @@ mod tests {
         assert_eq!(r["background"], true);
         let tid = r["task_id"].as_str().expect("task id").to_string();
         let done = wait_for(&tid, 5000).await;
-        assert_eq!(done.status, BgStatus::Done);
+        assert_eq!(
+            done.status,
+            BgStatus::Done,
+            "task failed: exit={:?} log={:?}",
+            done.exit_code,
+            read_task_log(&tid)
+        );
         let log = read_task_log(&tid).expect("log");
         assert!(log.contains("bg-via-bash"), "{log:?}");
 
