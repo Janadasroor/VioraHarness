@@ -35,7 +35,7 @@ Pattern: long-lived harness server — `stdio reader + message processor + threa
 |---|------|------------|---------------|
 | 1 | Agent Loop | `crates/core/src/loop/mod.rs` | `Receive→Assemble→CallLLM→Dispatch→Observe→Compact?→Repeat`; explicit recovery branches. |
 | 2 | Context | `crates/core/src/context/` | L1 sys + L2 git/QPA + L3 AGENTS.md + L4 memory (parallel prefetch) + L5 retriever. |
-| 3 | Tools/Skills | `crates/core/src/tools/` | `defineTool!` + `.txt` descriptions; skills `skills/SKILL.md` progressive disclosure. |
+| 3 | Tools/Skills | `crates/core/src/tools/` | 45+ registered tools (core + EDA domain + web/android); skills `skills/*/SKILL.md` progressive disclosure. |
 | 4 | Permissions | `crates/core/src/permissions/` | Flat triples last-match wins, default ask, `visibleTools()` filter. |
 | 5 | Sandbox | `crates/core/src/sandbox/` | bwrap/Landlock/seccomp Linux, Seatbelt macOS, Docker fallback. |
 | 6 | Session | `crates/core/src/session/` | SQLite event journal + projector, snapshot for `/undo`. |

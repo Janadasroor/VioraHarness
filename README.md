@@ -27,7 +27,7 @@ The stack is Rust throughout, with a Ratatui terminal interface, a Tokio-based H
 ```bash
 git clone https://github.com/Janadasroor/VioraHarness
 cd VioraHarness
-cargo install --path . --force   # refreshes ~/.cargo/bin and ~/.local/bin
+cargo install --path . --force   # installs to ~/.cargo/bin (symlink into ~/.local/bin too if that is on your PATH)
 ```
 
 Verify the installation:
@@ -50,11 +50,11 @@ vioraharness serve --port 4096        # HTTP SSE API (loopback; bearer token whe
 vioraharness shim --port 11435        # gateway shim for URL+key-only clients (-> /v1)
 ```
 
-Run `vioraharness --help` for the full command reference.
+Run `vioraharness --help` for the full command reference, including `exec` (one-shot non-interactive run), `gc` (snapshot garbage collection), and `run-loop` (overnight task queue in `tasks/`).
 
 ## Configuration
 
-Configuration is resolved hierarchically: `~/.config/vioraharness/vioraharness.json`, then `./vioraharness.json`, then `./.vioraharness/vioraharness.jsonc`, with `VIORAHARNESS_*` environment variables taking precedence. Key settings cover providers, permission triples, sandbox strictness, compaction threshold, agent mode (`eda` / `web` / `android`), theme, and notification preferences. See `AGENTS.md` for the environment variable reference.
+Configuration is resolved first-match-wins: `VIORAHARNESS_CONFIG` if set, then `./vioraharness.json`, then `./.vioraharness/vioraharness.json` (walking up parent directories), then `~/.config/vioraharness/vioraharness.json`. Files are strict JSON (no comments). `VIORAHARNESS_*` environment variables override individual settings on top. Key settings cover providers, permission triples, sandbox strictness, compaction threshold, agent mode (`eda` / `web` / `android`), theme, and notification preferences. See `AGENTS.md` for the environment variable reference.
 
 ## Providers
 
@@ -82,10 +82,8 @@ For circuit work the harness enforces a netlist-first order: write `.cir`, run `
 
 ## Documentation
 
-- `roadmap.md` — architecture single source of truth and phased build plan.
 - `ARCHITECTURE.md` — stable architecture reference with component diagram.
-- `RESEARCH.md` — vendor-neutral survey of harness designs (2025-2026).
-- `AGENTS.md` — agent working memory: commands, flags, modes, permissions, environment.
+- `AGENTS.md`, `roadmap.md`, `RESEARCH.md` — local working docs (agent memory, build plan, research survey). They are intentionally gitignored and do not ship with clones.
 
 ## License
 
