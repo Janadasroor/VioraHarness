@@ -181,11 +181,20 @@ pub async fn run_viora_command(args: &[String], timeout_secs: Option<u64>) -> Vi
 }
 
 pub fn normalize_portable(path_str: &str) -> String {
-    let mut s = path_str.replace('\\', "/");
-
-    let p = PathBuf::from(&s);
+    let s = path_str.replace('\\', "/");
+    // Split off a Windows drive prefix (`D:`) first: `components()` reports
+    // it as Prefix+RootDir, which the cleaner below would otherwise drop —
+    // turning every absolute Windows path into a wrong relative one (drive
+    // letter lost, jail checks fail closed on everything).
+    let (drive, rest) = match s.split_once(':') {
+        Some((d, tail)) if d.len() == 1 && d.as_bytes()[0].is_ascii_alphabetic() => {
+            (format!("{d}:"), tail)
+        }
+        _ => (String::new(), s.as_str()),
+    };
+    let p = PathBuf::from(rest);
     let mut out: Vec<String> = Vec::new();
-    let is_abs = s.starts_with('/');
+    let is_abs = !drive.is_empty() || rest.starts_with('/');
     for comp in p.components() {
         use std::path::Component::*;
         match comp {
@@ -198,7 +207,7 @@ pub fn normalize_portable(path_str: &str) -> String {
         }
     }
     let mut cleaned = if is_abs {
-        format!("/{}", out.join("/"))
+        format!("{drive}/{}", out.join("/"))
     } else {
         out.join("/")
     };
@@ -206,8 +215,7 @@ pub fn normalize_portable(path_str: &str) -> String {
         cleaned = ".".into();
     }
 
-    s = cleaned;
-    s
+    cleaned
 }
 
 pub fn relativize_if_under_base(path: &Path, base: &str) -> String {
@@ -374,6 +382,11 @@ mod tests {
         assert_eq!(normalize_portable(""), ".");
         assert_eq!(normalize_portable("."), ".");
         assert_eq!(normalize_portable("a//b"), "a/b");
+        // Windows drive prefixes survive (components() would drop them,
+        // turning absolute paths relative and breaking the jail).
+        assert_eq!(normalize_portable("D:\\a\\..\\b"), "D:/b");
+        assert_eq!(normalize_portable("d:/x/y"), "d:/x/y");
+        assert_eq!(normalize_portable("C:/"), "C:/");
     }
 
     #[test]

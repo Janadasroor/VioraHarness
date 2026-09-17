@@ -57,7 +57,10 @@ async fn test_netlist_validate_pass() {
 #[tokio::test]
 async fn test_read_and_glob() {
     let res = tools::execute_tool("read", serde_json::json!({"path": "Cargo.toml"})).await;
-    assert!(res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false));
+    assert!(
+        res.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+        "read Cargo.toml failed: {res}"
+    );
     let content = res.get("content").and_then(|v| v.as_str()).unwrap_or("");
     assert!(content.contains("vioraharness"));
 
