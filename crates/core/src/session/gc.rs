@@ -153,9 +153,11 @@ mod tests {
     use super::*;
 
     fn touch_old(path: &Path) {
-        // Backdate without extra deps (linux CI).
+        // Fixed old timestamp instead of shelling `touch -d` (GNU-only;
+        // macOS/BSD touch lacks `-d`). `-t CCYYMMDDhhmm` is POSIX and works
+        // on GNU, BSD, and busybox alike — and on Windows via Git Bash.
         let _ = std::process::Command::new("touch")
-            .args(["-d", "10 days ago"])
+            .args(["-t", "202001010000"])
             .arg(path)
             .output();
     }

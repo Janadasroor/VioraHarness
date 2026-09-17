@@ -288,8 +288,12 @@ pub fn is_within_root(path: &Path) -> bool {
 
     let path_norm = {
         let s = normalize_portable(&path.to_string_lossy());
-        let pb = PathBuf::from(s);
-        if pb.is_absolute() {
+        let pb = PathBuf::from(&s);
+        // A leading `/` is rooted intent: never join it onto the cwd drive
+        // (Windows would silently relocate `\evil` to `D:\evil`, landing
+        // inside the project and defeating the jail — the traversal tests
+        // cover exactly this). Unjoined it matches no root and denies.
+        if pb.is_absolute() || s.starts_with('/') {
             pb
         } else {
             cwd.join(pb)
@@ -307,6 +311,18 @@ pub fn is_within_root(path: &Path) -> bool {
         let tmp = std::env::temp_dir();
         if path.starts_with(&tmp) || path_norm.starts_with(&tmp) {
             return true;
+        }
+        // Case-insensitive filesystems (macOS/Windows) plus safety checks
+        // that lowercase commands before resolving: a lowercased temp path
+        // must still match. Linux keeps exact semantics (folding there
+        // would wrongly admit e.g. /TMP).
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            let tmp_folded = normalize_portable(&tmp.to_string_lossy()).to_lowercase();
+            let path_folded = path_norm.to_string_lossy().to_lowercase();
+            if path_folded.starts_with(&tmp_folded) {
+                return true;
+            }
         }
     }
 

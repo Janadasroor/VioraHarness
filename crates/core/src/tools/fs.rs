@@ -511,11 +511,11 @@ fn glob_match_path(rel: &str, pattern: &str) -> bool {
         return false;
     }
     if !pat.contains('/') {
-        let name = rel.rsplit('/').next().unwrap_or(rel);
+        let name = rel.rsplit(['/', '\\']).next().unwrap_or(rel);
         return segment_match(name, pat);
     }
     let psegs: Vec<&str> = pat.split('/').collect();
-    let rsegs: Vec<&str> = rel.split('/').collect();
+    let rsegs: Vec<&str> = rel.split(['/', '\\']).collect();
     match_segments(&rsegs, &psegs)
 }
 

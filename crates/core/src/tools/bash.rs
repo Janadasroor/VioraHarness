@@ -340,7 +340,9 @@ mod tests {
     #[tokio::test]
     async fn stdout_cut_never_splits_multibyte_chars() {
         // P0 #4: `&stdout[..7000]` panicked when byte 7000 landed in ｱ (3 bytes).
-        let r = bash(json!({"command": "python3 -c \"print('A'*6999 + 'ｱ' + 'B'*8000)\""})).await;
+        // Force UTF-8 stdout: Windows pipes default to a legacy codepage
+        // that cannot encode ｱ, failing the spawn instead of the cut logic.
+        let r = bash(json!({"command": "PYTHONIOENCODING=utf-8 python3 -c \"print('A'*6999 + 'ｱ' + 'B'*8000)\""})).await;
         assert_eq!(r["ok"], true, "{r}");
         assert_eq!(r["truncated"], true);
         assert!(r["stdout"].as_str().unwrap().contains("truncated"));
