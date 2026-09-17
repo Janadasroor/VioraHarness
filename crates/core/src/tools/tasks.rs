@@ -112,7 +112,14 @@ pub fn spawn_task_opts(command: &str, cwd: &str, sandboxed: bool) -> BgTask {
         tracing::warn!("background task {id} spawned without sandbox: {command}");
     }
 
+    // write:true matters, not just append:true (clippy disagrees — its
+    // ineffective-open-options lint is unix-blind, hence the allow below).
+    // An append-only handle inherits broken into Windows children (writes
+    // vanish, echo exits 1 with no output — every background task fails).
+    #[allow(clippy::ineffective_open_options)]
     let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
         .append(true)
         .open(&log_path)
         .ok();
@@ -386,92 +393,6 @@ mod tests {
         assert!(get_task("nope").is_none());
         assert!(!kill_task("nope"));
         assert!(read_task_log("nope").is_none());
-    }
-
-    // TEMPORARY CI DIAGNOSTIC — remove once the Windows background-task
-    // failure is understood (direct bash works, tasks-spawned bash exits 1
-    // silent). Bisects env vs stderr-destination.
-    #[tokio::test]
-    async fn dbg_win_shell_diag() {
-        use std::fmt::Write as _;
-        let mut out = String::new();
-        let bp = crate::tools::bash::bash_program();
-        // Compile-time dir: another test thread may chdir the process
-        // mid-run (snapshot tests do), so never snapshot current_dir here.
-        let repo = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let tmp = std::env::temp_dir();
-        // E: direct + QT_QPA (the only env delta tasks-spawn adds).
-        let e = tokio::process::Command::new(&bp)
-            .args(["-c", "echo E-ok; exit 51"])
-            .current_dir(&repo)
-            .env("QT_QPA_PLATFORM", "offscreen")
-            .output()
-            .await
-            .map(|o| {
-                (
-                    o.status.code(),
-                    String::from_utf8_lossy(&o.stdout).to_string(),
-                    String::from_utf8_lossy(&o.stderr).to_string(),
-                )
-            })
-            .map_err(|e| e.to_string());
-        writeln!(out, "E direct+qt/repo/pipe: {e:?}").unwrap();
-        // F: + stdout AND stderr to the same log file (tasks shape).
-        let flog = tmp.join("vh-diag-f.log");
-        let f = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&flog)
-        {
-            Ok(f) => {
-                let f2 = f.try_clone().ok();
-                tokio::process::Command::new(&bp)
-                    .args(["-c", "echo F-ok; exit 52"])
-                    .current_dir(&repo)
-                    .env("QT_QPA_PLATFORM", "offscreen")
-                    .stdout(std::process::Stdio::from(f))
-                    .stderr(
-                        f2.map(std::process::Stdio::from)
-                            .unwrap_or(std::process::Stdio::null()),
-                    )
-                    .status()
-                    .await
-                    .map(|s| s.code())
-                    .map_err(|e| e.to_string())
-            }
-            Err(e) => Err(format!("F log open failed: {e}")),
-        };
-        writeln!(out, "F direct+qt/repo/file+file: {f:?}").unwrap();
-        if let Ok(c) = std::fs::read_to_string(&flog) {
-            writeln!(out, "F log: {c:?}").unwrap();
-        }
-        // G: stdout to file, stderr null.
-        let glog = tmp.join("vh-diag-g.log");
-        let g = match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&glog)
-        {
-            Ok(f) => tokio::process::Command::new(&bp)
-                .args(["-c", "echo G-ok; exit 53"])
-                .current_dir(&repo)
-                .env("QT_QPA_PLATFORM", "offscreen")
-                .stdout(std::process::Stdio::from(f))
-                .stderr(std::process::Stdio::null())
-                .status()
-                .await
-                .map(|s| s.code())
-                .map_err(|e| e.to_string()),
-            Err(e) => Err(format!("G log open failed: {e}")),
-        };
-        writeln!(out, "G direct+qt/repo/file+null: {g:?}").unwrap();
-        let _ = std::fs::remove_file(&flog);
-        let _ = std::fs::remove_file(&glog);
-        // Always pass off-Windows (the data is only needed where tasks
-        // fail); on Windows fail deliberately so the output is shown.
-        if cfg!(windows) {
-            panic!("DIAG:\n{out}");
-        }
     }
 
     #[test]
