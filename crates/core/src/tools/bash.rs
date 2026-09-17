@@ -3,8 +3,39 @@
 
 use crate::loop_mod::{split_shell_segments, strip_wrappers, wants_detach};
 use serde_json::{json, Value};
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::process::Command as TokioCommand;
+
+static BASH_PROGRAM: OnceLock<String> = OnceLock::new();
+
+/// Shell binary for `bash -c` execution. Plain `"bash"` everywhere except
+/// Windows, where PATH's `bash` is typically the WSL launcher stub
+/// (System32) — it exits non-zero on every command, which reads as every
+/// shell tool being broken. Prefer Git for Windows' real bash at its
+/// default install locations (that path is definitionally msys bash).
+/// `VIORAHARNESS_BASH` overrides for exotic setups.
+pub fn bash_program() -> String {
+    BASH_PROGRAM
+        .get_or_init(|| {
+            if let Ok(custom) = std::env::var("VIORAHARNESS_BASH") {
+                if !custom.trim().is_empty() {
+                    return custom;
+                }
+            }
+            #[cfg(windows)]
+            for cand in [
+                "C:\\Program Files\\Git\\bin\\bash.exe",
+                "C:\\Program Files (x86)\\Git\\bin\\bash.exe",
+            ] {
+                if std::path::Path::new(cand).exists() {
+                    return cand.to_string();
+                }
+            }
+            "bash".to_string()
+        })
+        .clone()
+}
 
 pub fn is_annihilation(command: &str) -> bool {
     let lower = command.to_lowercase();
@@ -151,7 +182,7 @@ pub async fn bash(args: Value) -> Value {
         return super::tasks::launch_result(&task);
     }
 
-    let mut cmd = TokioCommand::new("bash");
+    let mut cmd = TokioCommand::new(bash_program());
     cmd.args(["-c", command]);
     cmd.current_dir(&cwd);
     cmd.env("QT_QPA_PLATFORM", "offscreen");

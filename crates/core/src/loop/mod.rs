@@ -1302,10 +1302,15 @@ mod tests {
         assert!(redirect_writes_external("make 2> /home/jnd/err.log"));
         assert!(redirect_writes_external("cmd &> /home/jnd/out"));
 
+        // The platform temp dir is always writable (== /tmp on Linux, the
+        // per-user sandbox on macOS/Windows) — redirects there are not
+        // external writes.
+        let tmp_x = std::env::temp_dir().join("x");
+        let tmp_cmd = format!("echo hi > {}", tmp_x.to_string_lossy());
         for seg in [
             "python3 -m pytest -v 2>&1",
             "ls /x 2>/dev/null",
-            "echo hi > /tmp/x",
+            tmp_cmd.as_str(),
             "echo hi",
             "cat f | grep x",
         ] {
@@ -1313,7 +1318,7 @@ mod tests {
         }
 
         assert!(!is_safe_bash(&bash_args("echo hi > /home/jnd/x.txt")));
-        assert!(is_safe_bash(&bash_args("echo hi > /tmp/x")));
+        assert!(is_safe_bash(&bash_args(&tmp_cmd)));
     }
 
     #[test]

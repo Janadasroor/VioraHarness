@@ -22,6 +22,28 @@ pub fn viospice_root() -> Option<String> {
 /// Resolve the `viora` binary: explicit `VIORA_BIN` wins, otherwise the first
 /// `viora` found on `PATH` (which already covers install locations such as
 /// `~/.local/bin`). No hardcoded checkout/build/output paths — installers put
+/// Split a PATH-style variable the platform way (`:` vs `;`). A hardcoded
+/// `split(':')` silently breaks every tool lookup on Windows (whose PATH
+/// entries contain drive-letter colons).
+pub fn each_path_dir(path_var: &str) -> impl Iterator<Item = PathBuf> + '_ {
+    std::env::split_paths(path_var).filter(|p| !p.as_os_str().is_empty())
+}
+
+/// `dir/name`, with an `.exe` fallback so bare-name PATH probes work on
+/// Windows (binaries carry the extension but callers name them bare).
+/// Returns `None` when neither exists.
+pub fn join_exe(dir: &Path, name: &str) -> Option<PathBuf> {
+    let p = dir.join(name);
+    if p.exists() {
+        return Some(p);
+    }
+    let e = dir.join(format!("{name}.exe"));
+    if e.exists() {
+        return Some(e);
+    }
+    None
+}
+
 /// `viora` on PATH; the harness must never reach into a source tree.
 pub fn resolve_viora() -> String {
     if let Ok(p) = std::env::var("VIORA_BIN") {
@@ -31,12 +53,8 @@ pub fn resolve_viora() -> String {
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            let cand = Path::new(dir).join("viora");
-            if cand.exists() {
+        for dir in each_path_dir(&path_var) {
+            if let Some(cand) = join_exe(&dir, "viora") {
                 return cand.to_string_lossy().to_string();
             }
         }
@@ -241,7 +259,11 @@ pub fn resolve_path(path_str: &str) -> PathBuf {
         }
     }
     let p = PathBuf::from(&normalized);
-    if p.is_absolute() {
+    // A leading `/` is absolute intent even where the OS disagrees
+    // (Windows: rooted without a drive is not `is_absolute`, but joining
+    // it onto the cwd drive would silently relocate it inside the project
+    // — return it as-is and let the jail vet it instead).
+    if p.is_absolute() || normalized.starts_with('/') {
         return p;
     }
 
@@ -276,6 +298,16 @@ pub fn is_within_root(path: &Path) -> bool {
 
     if path.starts_with("/tmp") || path_norm.starts_with("/tmp") {
         return true;
+    }
+    // Scratch allowance: the platform temp dir (`/tmp` on Linux, a per-user
+    // sandbox on macOS/Windows). Without this, every scratch-file workflow
+    // fails closed off-Linux (macOS temp lives under /var, Windows under
+    // %TEMP%) — for tests and real users alike.
+    {
+        let tmp = std::env::temp_dir();
+        if path.starts_with(&tmp) || path_norm.starts_with(&tmp) {
+            return true;
+        }
     }
 
     let path_str_lossy = path_norm.to_string_lossy().to_string();

@@ -519,6 +519,23 @@ fn glob_match_path(rel: &str, pattern: &str) -> bool {
     match_segments(&rsegs, &psegs)
 }
 
+/// Split one `grep -Rn` output line (`{path}:{line}:{text}`) with drive
+/// awareness: a leading Windows drive prefix (`C:`) is skipped so its
+/// colon is never misread as the field separator. (msys builds echo the
+/// `/c/...` form instead, which needs no special case.) A `:` inside a
+/// filename is exotic enough to ignore — the first `:<digits>:` wins.
+fn split_grep_line(line: &str) -> Option<(&str, u64, &str)> {
+    let bytes = line.as_bytes();
+    let mut skip = 0;
+    if bytes.len() > 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        skip = 2;
+    }
+    let (path, rest) = line[skip..].split_once(':')?;
+    let (digits, text) = rest.split_once(':')?;
+    let no: u64 = digits.parse().ok().filter(|n| *n > 0)?;
+    Some((&line[..skip + path.len()], no, text))
+}
+
 pub async fn grep(args: Value) -> Value {
     let pattern = args.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
@@ -606,16 +623,15 @@ pub async fn grep(args: Value) -> Value {
         let text = String::from_utf8_lossy(&out.stdout);
         let mut hits = Vec::new();
         for line in text.lines() {
-            let mut parts = line.splitn(3, ':');
-            let (Some(path), Some(no), Some(text)) = (parts.next(), parts.next(), parts.next())
-            else {
+            // GNU grep prints `{path}:{line}:{text}`. On Windows the path
+            // carries a drive-letter colon (`C:\...`, or msys `/c/...`
+            // form) — naive `split(':')` reads the drive letter as the
+            // path and drops every hit. Split the line number off with
+            // drive awareness instead.
+            let Some((path, no, text)) = split_grep_line(line) else {
                 continue;
             };
-            let line_no = no.parse::<u64>().unwrap_or(0);
-            if line_no == 0 {
-                continue;
-            }
-            hits.push(json!({"path": path, "line": line_no, "text": text.trim_end()}));
+            hits.push(json!({"path": path, "line": no, "text": text.trim_end()}));
             if hits.len() >= 100 {
                 break;
             }
@@ -696,6 +712,24 @@ mod tests {
             Some(v) => std::env::set_var("VIORAHARNESS_APPROVED_CALL", v),
             None => std::env::remove_var("VIORAHARNESS_APPROVED_CALL"),
         }
+    }
+
+    #[test]
+    fn grep_line_parses_drive_paths() {
+        assert_eq!(
+            split_grep_line("/repo/a.txt:1:hello"),
+            Some(("/repo/a.txt", 1, "hello"))
+        );
+        assert_eq!(
+            split_grep_line("C:\\d\\f.txt:12:hi: there"),
+            Some(("C:\\d\\f.txt", 12, "hi: there"))
+        );
+        assert_eq!(
+            split_grep_line("/c/Users/f.txt:3:x"),
+            Some(("/c/Users/f.txt", 3, "x"))
+        );
+        assert!(split_grep_line("garbage").is_none());
+        assert!(split_grep_line("f.txt:0:x").is_none());
     }
 
     #[tokio::test]

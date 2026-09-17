@@ -238,6 +238,13 @@ pub fn wrap_command(base: &mut tokio::process::Command, workdir: &str) {
 mod tests {
     use super::*;
 
+    fn restore_sandbox_env(prev: Option<String>) {
+        match prev {
+            Some(v) => std::env::set_var("VIORAHARNESS_SANDBOX", v),
+            None => std::env::remove_var("VIORAHARNESS_SANDBOX"),
+        }
+    }
+
     #[test]
     fn viora_state_dir_shape() {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -277,9 +284,19 @@ mod tests {
     #[test]
     fn x11_socket_dir_is_bound_not_masked() {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // These tests assert bwrap arg construction: meaningless with the
+        // sandbox kill-switch on (CI sets it) or without the binary.
+        let prev_sandbox = std::env::var("VIORAHARNESS_SANDBOX").ok();
+        std::env::remove_var("VIORAHARNESS_SANDBOX");
+        if !is_bwrap_available() {
+            restore_sandbox_env(prev_sandbox);
+            eprintln!("skip: bwrap not installed");
+            return;
+        }
         let mut cmd = tokio::process::Command::new("true");
         wrap_command(&mut cmd, "/tmp");
         let dbg = format!("{:?}", cmd.as_std());
+        restore_sandbox_env(prev_sandbox);
         assert!(dbg.contains(".X11-unix"), "X11 socket dir forwarded: {dbg}");
         assert!(
             !dbg.contains("tmpfs"),
@@ -290,6 +307,13 @@ mod tests {
     #[test]
     fn xauthority_shim_points_at_writable_copy() {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_sandbox = std::env::var("VIORAHARNESS_SANDBOX").ok();
+        std::env::remove_var("VIORAHARNESS_SANDBOX");
+        if !is_bwrap_available() {
+            restore_sandbox_env(prev_sandbox);
+            eprintln!("skip: bwrap not installed");
+            return;
+        }
         let prev = std::env::var("XAUTHORITY").ok();
         let dir = std::env::temp_dir().join(format!("vh-xauth-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -305,6 +329,7 @@ mod tests {
             None => std::env::remove_var("XAUTHORITY"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+        restore_sandbox_env(prev_sandbox);
         assert!(
             dbg.contains("/tmp/vioraharness-xauth/Xauthority"),
             "XAUTHORITY rewritten to writable copy: {dbg}"
@@ -349,10 +374,18 @@ mod tests {
     #[test]
     fn wrap_includes_viora_state_bind() {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_sandbox = std::env::var("VIORAHARNESS_SANDBOX").ok();
+        std::env::remove_var("VIORAHARNESS_SANDBOX");
+        if !is_bwrap_available() {
+            restore_sandbox_env(prev_sandbox);
+            eprintln!("skip: bwrap not installed");
+            return;
+        }
         let mut cmd = tokio::process::Command::new("true");
         wrap_command(&mut cmd, "/tmp");
         let dbg = format!("{:?}", cmd.as_std());
         let dir = viora_state_dir().expect("state dir resolves in test env");
+        restore_sandbox_env(prev_sandbox);
         assert!(
             dbg.contains(&dir),
             "viora state dir bound writable ({dir}): {dbg}"

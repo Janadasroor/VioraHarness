@@ -39,12 +39,8 @@ pub fn find_chrome() -> Option<String> {
             continue;
         }
         if let Ok(path_var) = std::env::var("PATH") {
-            for dir in path_var.split(':') {
-                if dir.is_empty() {
-                    continue;
-                }
-                let full = Path::new(dir).join(&cand);
-                if full.exists() {
+            for dir in crate::tools::viora::each_path_dir(&path_var) {
+                if let Some(full) = crate::tools::viora::join_exe(&dir, &cand) {
                     return Some(full.to_string_lossy().to_string());
                 }
             }
@@ -535,7 +531,15 @@ mod tests {
             Some(v) => std::env::set_var("CHROME_BIN", v),
             None => std::env::remove_var("CHROME_BIN"),
         }
-        assert!(chrome_candidates().contains(&"google-chrome".to_string()));
+        // Without the override the list holds bare names (resolved against
+        // PATH at use time, possibly to absolute paths) — match by suffix.
+        assert!(
+            chrome_candidates()
+                .iter()
+                .any(|c| c.ends_with("google-chrome") || c.ends_with("chrome")),
+            "{:?}",
+            chrome_candidates()
+        );
     }
 
     #[tokio::test]
@@ -633,7 +637,12 @@ mod tests {
 
     #[tokio::test]
     async fn dev_serve_rejects_missing_dir() {
-        let r = dev_serve(json!({"dir": "/tmp/vh-nope-dir-xyz-12345"})).await;
+        // Inside the platform temp dir so the jail lets it through to the
+        // existence check (a path outside every root would fail as
+        // access-denied instead of not-a-directory).
+        let missing = std::env::temp_dir().join("vh-nope-dir-xyz-12345");
+        let _ = std::fs::remove_dir_all(&missing);
+        let r = dev_serve(json!({"dir": missing.to_string_lossy()})).await;
         assert_eq!(r["ok"], false);
         assert!(
             r["error"].as_str().unwrap().contains("not a directory"),

@@ -39,12 +39,8 @@ fn exists(p: &str) -> bool {
 
 fn scan_path(exe: &str) -> Option<String> {
     if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            let cand = Path::new(dir).join(exe);
-            if cand.exists() {
+        for dir in super::viora::each_path_dir(&path_var) {
+            if let Some(cand) = super::viora::join_exe(&dir, exe) {
                 return Some(cand.to_string_lossy().to_string());
             }
         }
@@ -650,7 +646,7 @@ pub async fn gradle(args: Value) -> Value {
         res["notice"] = json!("gradle runs outside the bwrap sandbox (needs SDK + ~/.gradle caches); project dir stays jailed");
         return res;
     }
-    let mut cmd = TokioCommand::new("bash");
+    let mut cmd = TokioCommand::new(super::bash::bash_program());
     cmd.args(["-c", &cmdline]);
     cmd.current_dir(&dir_str);
     let mut res = run_foreground(cmd, timeout).await;

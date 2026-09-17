@@ -101,7 +101,7 @@ pub fn spawn_task_opts(command: &str, cwd: &str, sandboxed: bool) -> BgTask {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600));
     }
-    let mut cmd = TokioCommand::new("bash");
+    let mut cmd = TokioCommand::new(super::bash::bash_program());
     cmd.args(["-c", command]);
     cmd.current_dir(cwd);
     cmd.env("QT_QPA_PLATFORM", "offscreen");

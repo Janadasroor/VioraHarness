@@ -126,11 +126,12 @@ fn skill_candidates() -> Vec<PathBuf> {
         .map(|r| format!("{r}/skills"))
         .or_else(|| {
             let m = env!("CARGO_MANIFEST_DIR");
-            let ws = if m.ends_with("crates/core") {
-                m.trim_end_matches("/crates/core").to_string()
-            } else {
-                m.to_string()
-            };
+            // Separator-aware: CARGO_MANIFEST_DIR uses `\` on Windows, so a
+            // `/crates/core` suffix check never matches there and bundled
+            // skill discovery silently finds nothing.
+            let ws = m
+                .trim_end_matches("/crates/core")
+                .trim_end_matches("\\crates\\core");
             Some(format!("{ws}/skills"))
         })
         .unwrap_or_default();

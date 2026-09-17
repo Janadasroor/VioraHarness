@@ -30,6 +30,12 @@ jobs:
       - name: fmt
         run: cargo fmt --check
 
+      # Sandbox arg-construction tests need the real binary (they skip
+      # without it). Execution tests stay unsandboxed via the env below.
+      - name: install bubblewrap (linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+
       - name: clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

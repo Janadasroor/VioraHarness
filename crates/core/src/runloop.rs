@@ -181,7 +181,7 @@ pub fn run_validations(commands: &[String], cwd: &Path) -> Vec<ValidationResult>
     commands
         .iter()
         .map(|c| {
-            let out = std::process::Command::new("bash")
+            let out = std::process::Command::new(crate::tools::bash::bash_program())
                 .args(["-c", c])
                 .current_dir(cwd)
                 .env("QT_QPA_PLATFORM", "offscreen")
