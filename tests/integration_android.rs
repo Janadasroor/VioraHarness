@@ -25,11 +25,8 @@ fn adb_available() -> bool {
         }
     }
     if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            if std::path::Path::new(&format!("{dir}/adb")).exists() {
+        for dir in std::env::split_paths(&path_var) {
+            if dir.join("adb").exists() || dir.join("adb.exe").exists() {
                 return true;
             }
         }

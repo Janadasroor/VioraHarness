@@ -19,6 +19,12 @@ pub(crate) fn test_app() -> App {
     app
 }
 
+/// Writable workdir for background-task tests. `std::env::temp_dir()` is
+/// portable (`/tmp` does not exist on Windows runners).
+pub(crate) fn test_workdir() -> String {
+    std::env::temp_dir().to_string_lossy().into_owned()
+}
+
 pub(crate) fn render_text(app: &mut App, w: u16, h: u16) -> String {
     let backend = TestBackend::new(w, h);
     let mut term = Terminal::new(backend).unwrap();

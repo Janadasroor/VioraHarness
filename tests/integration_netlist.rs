@@ -12,11 +12,8 @@ fn viora_built() -> bool {
         }
     }
     if let Ok(path_var) = std::env::var("PATH") {
-        for dir in path_var.split(':') {
-            if dir.is_empty() {
-                continue;
-            }
-            if std::path::Path::new(&format!("{dir}/viora")).exists() {
+        for dir in std::env::split_paths(&path_var) {
+            if dir.join("viora").exists() || dir.join("viora.exe").exists() {
                 return true;
             }
         }
@@ -30,7 +27,10 @@ async fn test_netlist_validate_pass() {
         eprintln!("skip: viora not built");
         return;
     }
-    let cir_path = "/tmp/vh_test_rc.cir";
+    let cir_path = std::env::temp_dir()
+        .join("vh_test_rc.cir")
+        .to_string_lossy()
+        .into_owned();
     let cir =
         "* RC test\nV1 in 0 DC 5\nR1 in out 1k\nC1 out 0 1u\n.tran 1u 1m\n.save V(out)\n.end\n";
     let write_res = tools::execute_tool(

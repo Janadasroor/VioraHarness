@@ -1,0 +1,42 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Windows runners leave HOME unset, but the harness (and its
+      # tests) resolve data/config dirs from it. Point it at the user
+      # profile so path handling behaves like a real Windows install.
+      - name: windows HOME shim
+        if: runner.os == 'Windows'
+        run: echo "HOME=$env:USERPROFILE" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      - name: fmt
+        run: cargo fmt --check
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --workspace
+        env:
+          # No bwrap/Seatbelt on CI runners: exercise the unsandboxed
+          # path. Integration suites need a real viora binary / adb
+          # device and self-skip without them.
+          VIORAHARNESS_SANDBOX: off

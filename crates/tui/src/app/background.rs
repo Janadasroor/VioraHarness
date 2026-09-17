@@ -419,6 +419,10 @@ impl App {
 }
 
 #[cfg(test)]
+// Env/global-registry tests serialize on process-global locks held across
+// awaits by design; the deadlock risk the lint guards against does not
+// apply to these test-only guards.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use crate::app::testkit::*;
@@ -478,8 +482,9 @@ mod tests {
             .expect("temp store")
             .create_session(&app.session_id, "m", None)
             .expect("session");
-        let t = tasks::spawn_task("echo wake-probe-xyz", "/tmp");
-        let t2 = tasks::spawn_task("echo wake-probe-second", "/tmp");
+        let workdir = test_workdir();
+        let t = tasks::spawn_task("echo wake-probe-xyz", &workdir);
+        let t2 = tasks::spawn_task("echo wake-probe-second", &workdir);
         wait_task_done(&t.id).await;
         wait_task_done(&t2.id).await;
         let waked = app.poll_task_completions();
@@ -526,7 +531,8 @@ mod tests {
             .expect("temp store")
             .create_session(&app.session_id, "m", None)
             .expect("session");
-        let t = tasks::spawn_task("echo role-probe", "/tmp");
+        let workdir = test_workdir();
+        let t = tasks::spawn_task("echo role-probe", &workdir);
         wait_task_done(&t.id).await;
         let _ = app.poll_task_completions();
         assert!(app.busy, "wake turn started");
@@ -597,7 +603,8 @@ mod tests {
         let (db, prev, _env_guard) = with_temp_db("quiet");
 
         let mut app = test_app();
-        let t = tasks::spawn_task("echo quiet-probe-xyz", "/tmp");
+        let workdir = test_workdir();
+        let t = tasks::spawn_task("echo quiet-probe-xyz", &workdir);
         wait_task_done(&t.id).await;
         app.busy = true;
         let waked = app.poll_task_completions();
@@ -619,7 +626,8 @@ mod tests {
             "notice still posted"
         );
 
-        let t2 = tasks::spawn_task("echo quiet-probe-abc", "/tmp");
+        let workdir = test_workdir();
+        let t2 = tasks::spawn_task("echo quiet-probe-abc", &workdir);
         wait_task_done(&t2.id).await;
         app.busy = false;
         app.wake_on_tasks = false;
@@ -930,7 +938,8 @@ mod tests {
     #[tokio::test]
     async fn footer_shows_running_tasks() {
         use vioraharness_core::tools::tasks;
-        let live = tasks::spawn_task("sleep 30", "/tmp");
+        let workdir = test_workdir();
+        let live = tasks::spawn_task("sleep 30", &workdir);
         let mut app = test_app();
         let text = render_text(&mut app, 120, 30);
         let footer = text.lines().last().unwrap_or("").to_string();
@@ -958,7 +967,8 @@ mod tests {
     async fn tasks_panel_lists_and_kills() {
         use vioraharness_core::tools::tasks;
 
-        let t = tasks::spawn_task("echo panel-probe-xyz", "/tmp");
+        let workdir = test_workdir();
+        let t = tasks::spawn_task("echo panel-probe-xyz", &workdir);
         let start = std::time::Instant::now();
         loop {
             if let Some(cur) = tasks::get_task(&t.id) {
@@ -982,7 +992,8 @@ mod tests {
             assert!(line.chars().count() <= 100, "row {i} fits: {line:?}");
         }
 
-        let live = tasks::spawn_task("sleep 30", "/tmp");
+        let workdir = test_workdir();
+        let live = tasks::spawn_task("sleep 30", &workdir);
         let mut app = test_app();
         app.handle_slash("/tasks");
 
@@ -1656,7 +1667,7 @@ mod tests {
         let sends: Vec<_> = app.queued_prompts.iter().map(|q| q.send.as_str()).collect();
         assert_eq!(sends, vec!["i1", "i2", "normal"], "oldest first: {sends:?}");
         assert!(
-            app.queued_prompts[0].echo == false && app.queued_prompts[1].echo == false,
+            !app.queued_prompts[0].echo && !app.queued_prompts[1].echo,
             "no re-echo for already-displayed prompts"
         );
         assert!(app.queued_prompts[2].echo, "normal keeps its echo");

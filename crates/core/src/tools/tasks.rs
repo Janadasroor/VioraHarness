@@ -312,7 +312,8 @@ mod tests {
         let _g = crate::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var(crate::mode::MODE_ENV_VAR).ok();
         std::env::set_var(crate::mode::MODE_ENV_VAR, "web");
-        let t = spawn_task("true", "/tmp");
+        let workdir = std::env::temp_dir().to_string_lossy().into_owned();
+        let t = spawn_task("true", &workdir);
         let done = wait_for(&t.id, 5000).await;
         assert_eq!(done.mode, "web", "task keeps its origin mode");
         assert_eq!(launch_result(&done)["mode"], "web");

@@ -792,6 +792,10 @@ fn chrono_now() -> i64 {
 }
 
 #[cfg(test)]
+// Env-mutating tests serialize on process-global locks held across awaits
+// by design (env sets + awaits must not interleave); the deadlock risk the
+// lint guards against does not apply to these test-only guards.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
 

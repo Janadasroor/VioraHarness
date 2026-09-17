@@ -481,6 +481,10 @@ impl App {
 }
 
 #[cfg(test)]
+// Env/global-registry tests serialize on process-global locks held across
+// awaits by design; the deadlock risk the lint guards against does not
+// apply to these test-only guards.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::super::testkit::*;
     use super::*;
@@ -636,7 +640,8 @@ mod tests {
     #[tokio::test]
     async fn task_enter_jumps_to_tasks_focused() {
         let _lock = completion_lock();
-        let live = tasks::spawn_task("sleep 30", "/tmp");
+        let workdir = test_workdir();
+        let live = tasks::spawn_task("sleep 30", &workdir);
         let mut app = test_app();
         app.popup = Popup::Agents;
         // The task registry is shared with parallel tests, which can shift
