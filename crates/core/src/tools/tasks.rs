@@ -87,6 +87,44 @@ pub fn spawn_task(command: &str, cwd: &str) -> BgTask {
     spawn_task_opts(command, cwd, true)
 }
 
+/// Drain one piped child stream into the task log. Retries each chunk a
+/// few times: a freshly-created log can be briefly unwritable (Windows
+/// scanners lock new files), and a dropped chunk must never fail the task.
+async fn pump_stream_to_log<S>(mut stream: S, log_path: String)
+where
+    S: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buf = vec![0u8; 8192];
+    loop {
+        match stream.read(&mut buf).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => append_log_chunk(&log_path, &buf[..n]),
+        }
+    }
+}
+
+fn append_log_chunk(log_path: &str, chunk: &[u8]) {
+    for attempt in 0..5u64 {
+        let res = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .and_then(|mut f| {
+                use std::io::Write;
+                f.write_all(chunk)
+            });
+        if res.is_ok() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20 * (attempt + 1)));
+    }
+    tracing::warn!(
+        "background task log append failed, dropping {} bytes",
+        chunk.len()
+    );
+}
+
 /// Like [`spawn_task`], but `sandboxed=false` skips the bwrap wrapper with
 /// the caller's notice. Reserved for processes that are isolation
 /// boundaries themselves (emulator = KVM VM, Gradle = needs SDK/caches)
@@ -112,30 +150,27 @@ pub fn spawn_task_opts(command: &str, cwd: &str, sandboxed: bool) -> BgTask {
         tracing::warn!("background task {id} spawned without sandbox: {command}");
     }
 
-    // write:true matters, not just append:true (clippy disagrees — its
-    // ineffective-open-options lint is unix-blind, hence the allow below).
-    // An append-only handle inherits broken into Windows children (writes
-    // vanish, echo exits 1 with no output — every background task fails).
-    #[allow(clippy::ineffective_open_options)]
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .append(true)
-        .open(&log_path)
-        .ok();
-    let log_file2 = log_file.as_ref().and_then(|f| f.try_clone().ok());
-    if let Some(f) = log_file {
-        cmd.stdout(std::process::Stdio::from(f));
-    } else {
-        cmd.stdout(std::process::Stdio::null());
-    }
-    if let Some(f) = log_file2 {
-        cmd.stderr(std::process::Stdio::from(f));
-    } else {
-        cmd.stderr(std::process::Stdio::null());
-    }
+    // Piped stdio + a Rust-side pump into the log file. An earlier design
+    // passed log files straight into the child, but inherited file handles
+    // are cursed on Windows (the child's first writes fail while the fresh
+    // log is being scanned, so fast commands exit 1 with header-only logs).
+    // Pipes keep the child side trivial; the pump owns all file I/O with
+    // retries, so a transient lock costs log bytes at worst — task status
+    // always comes from try_wait, never from logging.
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
 
-    let child = cmd.spawn().ok();
+    let mut child = cmd.spawn().ok();
+    if let Some(child) = child.as_mut() {
+        if let Some(s) = child.stdout.take() {
+            let log = log_path.clone();
+            tokio::spawn(async move { pump_stream_to_log(s, log).await });
+        }
+        if let Some(s) = child.stderr.take() {
+            let log = log_path.clone();
+            tokio::spawn(async move { pump_stream_to_log(s, log).await });
+        }
+    }
     let pid = child.as_ref().and_then(|c| c.id());
     let meta = BgTask {
         id: id.clone(),
